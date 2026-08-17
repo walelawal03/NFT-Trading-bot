@@ -71,6 +71,8 @@ import { estimateV2PriceImpact } from "../risk/priceImpact.js";
 import { renderOpenCard, renderCloseCard } from "./tradeCard.js";
 import { renderPnlCalendar } from "./pnlCalendar.js";
 import { computeNftRiskScore } from "../risk/nftRisk.js";
+import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftDangerousFunctions.js";
+import { buildNftScanMessage } from "./formatNftScan.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
 import { loadNftFilters, saveNftFilters } from "../filters/nftFilter.js";
@@ -450,7 +452,8 @@ function nftMenuKeyboard() {
     [Markup.button.callback("⚙️ NFT Filter", "menu:nftfilter"), Markup.button.callback("👛 Watched Wallets", "menu:nftwallets")],
     [Markup.button.callback("📈 NFT Paper Trading", "menu:nftpapertrading")],
     [Markup.button.callback("💰 NFT Real Trading", "menu:nftrealtrading")],
-    [Markup.button.callback("🔍 Score Collection", "menu:nftscore")],
+    [Markup.button.callback("🔍 Score Collection", "menu:nftscore"),
+     Markup.button.callback("🛡 Contract Scan", "menu:nftcheck")],
     [Markup.button.callback(notifsOn ? "🔔 Notifications: ON (tap to mute)" : "🔕 Notifications: OFF (tap to unmute)", "menu:nfttogglenotifications")],
     [Markup.button.callback("🔙 Menu", "menu:home")],
   ]);
@@ -994,6 +997,30 @@ async function scoreAndReplyNft(ctx, contractAddress, chainKeyHint) {
   await ctx.reply(message, { parse_mode: "Markdown", ...backKeyboard() });
 }
 
+// Pure bytecode + storage scan. Deliberately does NOT go through
+// detectNftChain: that resolves the collection via OpenSea and throws when
+// OpenSea hasn't indexed it, which is exactly the case this exists to
+// cover. Chain is explicit or defaults to the first enabled NFT chain.
+//
+// No OPENSEA_API_KEY gate either, for the same reason — this path has no
+// OpenSea dependency, so requiring the key would block the one check that
+// still works without it.
+async function scanAndReplyNftContract(ctx, contractAddress, chainKeyHint) {
+  const chainKey = chainKeyHint || getNftChainKeys()[0];
+  if (!CHAINS[chainKey]) {
+    throw new Error(`Unknown chain. Options: ${getNftChainKeys().join(", ")}`);
+  }
+  const chain = { key: chainKey, ...CHAINS[chainKey] };
+
+  const startedAt = Date.now();
+  const scan = await detectNftDangerousFunctions(chain, contractAddress, { budgetMs: 8000 });
+  const elapsedMs = Date.now() - startedAt;
+  const verdict = assessNftContractRisk(scan);
+
+  const message = buildNftScanMessage({ chain, contractAddress, scan, verdict, elapsedMs });
+  await ctx.reply(message, { parse_mode: "Markdown", ...backKeyboard() });
+}
+
 // Resolves a bare <address> (auto-detected chain) or explicit <chain>
 // <address> from a plain args array (no leading command word).
 async function resolveChainAndAddress(ctx, args, usage) {
@@ -1490,6 +1517,20 @@ async function handlePendingAction(ctx, pending, text, digestControls) {
       await scoreAndReplyNft(ctx, contractAddress);
     } catch (err) {
       return ctx.reply(`Failed to score collection: ${err.message}`);
+    }
+    return;
+  }
+
+  if (pending.type === "nftCheck") {
+    const contractAddress = text.trim();
+    if (!ADDRESS_RE.test(contractAddress)) {
+      return ctx.reply("That doesn't look like a valid contract address.");
+    }
+    await ctx.reply("Reading contract…");
+    try {
+      await scanAndReplyNftContract(ctx, contractAddress);
+    } catch (err) {
+      return ctx.reply(`Scan failed: ${err.message}`);
     }
     return;
   }
@@ -2810,6 +2851,14 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.reply("Paste the NFT collection's contract address.");
   });
 
+  // No requireOpensea gate: the scan reads the contract directly, so it is
+  // the one NFT check that still works without an OpenSea key.
+  bot.action("menu:nftcheck", async (ctx) => {
+    await ctx.answerCbQuery();
+    setPending(ctx.chat.id, { type: "nftCheck" });
+    await ctx.reply(`Paste the contract address to scan (chain: ${getNftChainKeys()[0]}).`);
+  });
+
   // Slash commands still work underneath the buttons, for muscle memory.
   bot.command("status", (ctx) => ctx.reply(renderStatusText(stats), { parse_mode: "Markdown", ...backKeyboard() }));
   bot.command("watchlist", async (ctx) => {
@@ -2915,6 +2964,32 @@ export function createBot(stats, chainControls, digestControls) {
       await scoreAndReplyNft(ctx, contractAddress, chainKeyHint);
     } catch (err) {
       ctx.reply(`Failed to score collection: ${err.message}`);
+    }
+  });
+
+  bot.command("nftcheck", async (ctx) => {
+    const args = ctx.message.text.split(/\s+/).filter(Boolean).slice(1);
+    const usage =
+      `Usage: /nftcheck <contractAddress> or /nftcheck <chain> <contractAddress>\n` +
+      `Chains: ${getNftChainKeys().join(", ")} (defaults to ${getNftChainKeys()[0]})\n\n` +
+      `Static contract scan — no OpenSea, no GoPlus. Works on brand-new contracts.`;
+
+    let chainKeyHint, contractAddress;
+    if (args.length === 1) {
+      contractAddress = args[0];
+    } else if (args.length === 2) {
+      [chainKeyHint, contractAddress] = args;
+      chainKeyHint = chainKeyHint.toLowerCase();
+    } else {
+      return ctx.reply(usage);
+    }
+    if (!contractAddress || !ADDRESS_RE.test(contractAddress)) return ctx.reply(usage);
+
+    await ctx.reply("Reading contract…");
+    try {
+      await scanAndReplyNftContract(ctx, contractAddress, chainKeyHint);
+    } catch (err) {
+      ctx.reply(`Scan failed: ${err.message}`);
     }
   });
   bot.command("watchwallet", async (ctx) => {

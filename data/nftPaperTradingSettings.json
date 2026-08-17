@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "totalBudgetEth": 2,
+  "positionSizeEth": 0.05,
+  "targetMultiple": 2,
+  "stopFloorPct": -50
+}

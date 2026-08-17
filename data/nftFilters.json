@@ -1,0 +1,13 @@
+{
+  "minFloorPriceEth": 0,
+  "maxFloorPriceEth": 5,
+  "minVolume24hEth": 0,
+  "minOwnerCount": 0,
+  "maxOwnerConcentrationPercent": 100,
+  "requireSafelistedOrVerified": false,
+  "blockMalicious": true,
+  "minRiskScore": 0,
+  "minCopyTradeBuyEth": 0,
+  "minWalletSignals": 0,
+  "minWalletWinRatePercent": 0
+}

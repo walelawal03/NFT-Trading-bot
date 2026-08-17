@@ -1,0 +1,337 @@
+import fs from "node:fs";
+import path from "node:path";
+import { getBestPair, pairSummary } from "../risk/dexscreener.js";
+import { getTokenSecurity } from "../risk/goplus.js";
+import { getDataDir, seedFileIfMissing } from "../dataDir.js";
+import { UNKNOWN_SELECTOR_REJECT_THRESHOLD } from "../risk/bytecodeAnalysis.js";
+import { scoreRugProbability } from "../ai/rugClassifier.js";
+import { scoreOwnRugProbability } from "../ai/ourRugClassifier.js";
+
+const filtersPath = path.join(getDataDir(), "filters.json");
+
+// Merged over whatever's persisted — an already-provisioned Railway volume
+// has its own filters.json from before any given key existed, and
+// seedFileIfMissing only copies the bundled template onto a volume that has
+// no file at all yet, so a new key added here would otherwise silently never
+// reach a live instance without this merge.
+const DEFAULTS = {
+  blockUnknownBytecode: true,
+  blockSellRestrictionFunctions: true,
+  requireRoundTripTaxCheck: true,
+  maxLiquidityToMarketCapRatio: 0.6,
+  // Off by default — see the rug-probability gates in applyFilter for why.
+  maxRugProbability: 0,
+  maxOwnRugProbability: 0,
+};
+
+export function loadFilters() {
+  seedFileIfMissing("filters.json");
+  const raw = JSON.parse(fs.readFileSync(filtersPath, "utf8"));
+  return { ...DEFAULTS, ...raw };
+}
+
+export function saveFilters(filters) {
+  fs.writeFileSync(filtersPath, JSON.stringify(filters, null, 2));
+}
+
+const isTrue = (v) => v === "1" || v === 1 || v === true;
+
+// Cheap, DexScreener-only re-check of liquidity against the same floor
+// applyFilter already enforces — used right before a buy executes to catch
+// a rug that happened in the gap between the original filter pass and the
+// on-chain purchase. Deliberately skips the GoPlus/Etherscan/AI round trip
+// that computeRiskScore does — this only needs to answer "is the liquidity
+// still there," not re-score the whole token.
+export async function checkFreshLiquidity(chain, tokenAddress) {
+  const filters = loadFilters();
+  // getBestPair throws on any non-404 response, and this runs between the
+  // call being recorded and the buy being placed — so an unhandled throw here
+  // doesn't just skip the buy, it unwinds the rest of evaluateToken and takes
+  // the caller's success log with it. That is exactly what happened to HOOPLA
+  // and ALLONBINANCE on 2026-08-13: a brief DNS outage
+  // (getaddrinfo ENOTFOUND api.dexscreener.com) left both recorded as called
+  // with no trade opened and no stdout line, the failure visible only as
+  // "[recheck] failed" on stderr.
+  //
+  // Fails CLOSED (pass: false) rather than open — we genuinely cannot confirm
+  // the liquidity is still there, and this guard exists specifically to catch
+  // a rug in that window. `error: true` lets callers report an infrastructure
+  // skip instead of mislabelling it as a detected rug.
+  let dexPair;
+  try {
+    dexPair = await getBestPair(chain.dexscreenerChainId, tokenAddress);
+  } catch (err) {
+    return {
+      pass: false,
+      error: true,
+      liquidityUsd: null,
+      reason: `liquidity re-check unavailable (${err.message}) — skipping rather than buying unverified`,
+    };
+  }
+  const pair = pairSummary(dexPair, tokenAddress);
+  const liquidityUsd = pair?.liquidityUsd || 0;
+  if (liquidityUsd < filters.minLiquidityUsd) {
+    return {
+      pass: false,
+      liquidityUsd,
+      reason: `Liquidity dropped to $${liquidityUsd.toFixed(0)} (below $${filters.minLiquidityUsd} minimum) — rug between call and buy`,
+    };
+  }
+  return { pass: true, liquidityUsd };
+}
+
+// Re-checks GoPlus's honeypot verdict right before a real buy executes.
+// GoPlus can lag behind indexing a brand-new token by anywhere from seconds
+// to a couple minutes — the original computeRiskScore pass may have run
+// before GoPlus had anything on this token at all (an empty result,
+// indistinguishable in the score from "chain not covered"), but by the time
+// we're about to spend real money — after AI screens, the Telegram send,
+// etc. — GoPlus has often caught up. Confirmed live on SKHYB/BNB Chain:
+// GoPlus returned nothing at the original call, but re-querying it minutes
+// later showed is_honeypot: true — the correct answer existed, just not yet
+// when the bot first asked. Fails open (pass: true) on no data or a lookup
+// error — this is a bonus second chance to catch what the first pass
+// missed, not a new hard requirement for chains/tokens GoPlus never covers.
+export async function checkFreshHoneypotStatus(chain, tokenAddress) {
+  try {
+    const sec = await getTokenSecurity(chain.goplusChainId, tokenAddress);
+    if (sec && isTrue(sec.is_honeypot)) {
+      return { pass: false, reason: "GoPlus now flags this token as a honeypot (wasn't indexed yet at the original filter pass)" };
+    }
+    const sellTax = sec ? Number(sec.sell_tax) || 0 : 0;
+    if (sellTax >= 0.5) {
+      return { pass: false, reason: `GoPlus now shows sell tax ${(sellTax * 100).toFixed(0)}% (wasn't indexed yet at the original filter pass)` };
+    }
+    if (sec && isTrue(sec.owner_change_balance)) {
+      return { pass: false, reason: "GoPlus now shows the owner can alter holder balances (wasn't indexed yet at the original filter pass)" };
+    }
+    return { pass: true };
+  } catch {
+    return { pass: true };
+  }
+}
+
+// Decides whether a scored token gets "called". Returns { pass, reasons }.
+// chainKey/launchSource are optional — only needed for the AI rug-probability
+// gate below; existing callers that don't pass them just skip that check.
+export function applyFilter(riskResult, tokenAgeMinutes, { chainKey, launchSource, priceImpactPct } = {}) {
+  const filters = loadFilters();
+  const reasons = [];
+  const { security, pair, score, lpLock } = riskResult;
+
+  if (score < filters.minRiskScore) reasons.push(`Risk score ${score} below minimum ${filters.minRiskScore}`);
+
+  if (tokenAgeMinutes != null && tokenAgeMinutes > filters.maxTokenAgeMinutes) {
+    reasons.push(`Token age ${tokenAgeMinutes}m exceeds max ${filters.maxTokenAgeMinutes}m`);
+  }
+
+  // Floor on age — deliberately declining to be the first buyer. The launch
+  // minutes are when the deployer still holds everything, when a dev sell or
+  // an instant rug lands, and when there is no price history to judge. Waiting
+  // costs the very start of a move and buys the information that the token
+  // survived its own launch. 0/unset = no floor, which is the shipped default:
+  // this only changes behaviour once a value is set deliberately, since a floor
+  // directly reduces call volume and that trade-off is the operator's to make.
+  const minAge = filters.minTokenAgeMinutes || 0;
+  if (minAge > 0 && tokenAgeMinutes != null && tokenAgeMinutes < minAge) {
+    reasons.push(`Token age ${tokenAgeMinutes}m below minimum ${minAge}m — too early to judge, waiting for it to survive its launch`);
+  }
+
+  const liq = pair?.liquidityUsd || 0;
+  if (liq < filters.minLiquidityUsd) reasons.push(`Liquidity $${liq.toFixed(0)} below minimum $${filters.minLiquidityUsd}`);
+
+  // What a real trade of our own size would actually cost to enter, measured
+  // against the pool's real reserves — not the headline liquidity number, and
+  // not the price on the chart. A thin pool can satisfy minLiquidityUsd and
+  // still move several percent against a small buy, and whatever it costs
+  // going in it costs again coming out, so high impact means the displayed
+  // price was never a price we could transact at.
+  //
+  // estimateV2PriceImpact has existed in risk/priceImpact.js since before
+  // this gate, but was only ever printed in the Telegram terminal for a human
+  // to eyeball — it never blocked anything. 0/unset = no ceiling, the shipped
+  // default, since a real value trades call volume for exit quality.
+  if (filters.maxPriceImpactPct > 0 && priceImpactPct != null && priceImpactPct > filters.maxPriceImpactPct) {
+    reasons.push(
+      `Price impact ${priceImpactPct.toFixed(1)}% exceeds max ${filters.maxPriceImpactPct}% — pool too thin to enter and exit at the quoted price`
+    );
+  }
+
+  // Ceiling on market cap keeps calls in "still early" territory — a token
+  // already past this size has less room left to run. 0/unset = no ceiling.
+  const mcap = pair?.marketCapUsd || 0;
+  if (filters.maxMarketCapUsd > 0 && mcap > filters.maxMarketCapUsd) {
+    reasons.push(`Market cap $${mcap.toFixed(0)} above maximum $${filters.maxMarketCapUsd}`);
+  }
+
+  // Floor on market cap — the one lever the preset filters (basic/super
+  // basic/super ultra mega) actually tune, based on real historical data:
+  // call-time market cap correlated with pump outcome (higher floor → more
+  // likely to hit bigger milestones). 0/unset = no floor.
+  if (filters.minMarketCapUsd > 0 && mcap < filters.minMarketCapUsd) {
+    reasons.push(`Market cap $${mcap.toFixed(0)} below minimum $${filters.minMarketCapUsd}`);
+  }
+
+  // Liquidity unusually high relative to market cap — backtested against
+  // the 2026-07-14 honeypot batch (5 confirmed honeypots on BSC/Robinhood
+  // Chain), where this ratio was the one numeric trait shared across all of
+  // them and absent from the confirmed-legit comparison. 0/unset = no cap.
+  if (filters.maxLiquidityToMarketCapRatio > 0 && mcap > 0) {
+    const liqToMcap = liq / mcap;
+    if (liqToMcap > filters.maxLiquidityToMarketCapRatio) {
+      reasons.push(
+        `Liquidity/market-cap ratio ${liqToMcap.toFixed(2)} above maximum ${filters.maxLiquidityToMarketCapRatio}`
+      );
+    }
+  }
+
+  // Volume is evidence of real trading interest, distinct from liquidity
+  // just sitting idle. 0/unset = no minimum.
+  const volume24h = pair?.volume24h || 0;
+  if (filters.minVolume24hUsd > 0 && volume24h < filters.minVolume24hUsd) {
+    reasons.push(`24h volume $${volume24h.toFixed(0)} below minimum $${filters.minVolume24hUsd}`);
+  }
+
+  // Ceiling on volume — backtested across 420 historical calls (train/test
+  // validated, not just in-sample): unusually high call-time volume relative
+  // to a token this new correlates with lower win rate, consistent with
+  // wash-traded pump-and-dump activity rather than organic interest.
+  // 0/unset = no ceiling.
+  if (filters.maxVolume24hUsd > 0 && volume24h > filters.maxVolume24hUsd) {
+    reasons.push(`24h volume $${volume24h.toFixed(0)} above maximum $${filters.maxVolume24hUsd}`);
+  }
+
+  // Logistic regression ported from the upstream repo this bot started
+  // from (src/ai/rugModelArtifact.json) — trained on ITS 406 closed trades,
+  // chronological held-out test AUC 0.857 on ITS data, not ours. 0/unset =
+  // gate disabled by default here for exactly that reason: it's an
+  // out-of-distribution model until validated against our own call/outcome
+  // history (different filter settings over time, different chain mix).
+  // chainKey is required for a real score; silently skips if not provided.
+  if (filters.maxRugProbability > 0 && chainKey) {
+    const { rugProbability } = scoreRugProbability({
+      liquidityUsd: liq,
+      volume24hUsd: volume24h,
+      marketCapUsd: mcap,
+      riskScore: score,
+      chain: chainKey,
+      launchSource,
+    });
+    if (rugProbability > filters.maxRugProbability) {
+      reasons.push(`AI rug model: ${(rugProbability * 100).toFixed(0)}% rug probability above maximum ${(filters.maxRugProbability * 100).toFixed(0)}%`);
+    }
+  }
+
+  // Our own logistic regression (src/ai/ourRugModelArtifact.json), trained
+  // on our own 110 closed paper trades — label is exit_reason='stale_price'
+  // (our dead-pool/rug detector). Cross-validated AUC 0.951, chronological
+  // held-out AUC 0.926 (train on older 70% by entry_at, test on strictly
+  // newer ones) — both well above the ported model's 0.702 on this same
+  // dataset, as expected since this one is actually calibrated to our token
+  // population. Still 0/unset off by default: n=110 is all from one ~4-day
+  // window, and a model that looks great on 4 days of data isn't proven to
+  // hold up for months. Retrain periodically via scripts/trainRugModel.py
+  // as more calls close, rather than treating this as a one-time result.
+  if (filters.maxOwnRugProbability > 0 && chainKey) {
+    const { rugProbability: ownRugProbability } = scoreOwnRugProbability({
+      liquidityUsd: liq,
+      volume24hUsd: volume24h,
+      marketCapUsd: mcap,
+      riskScore: score,
+      chain: chainKey,
+    });
+    if (ownRugProbability > filters.maxOwnRugProbability) {
+      reasons.push(`Our own rug model: ${(ownRugProbability * 100).toFixed(0)}% rug probability above maximum ${(filters.maxOwnRugProbability * 100).toFixed(0)}%`);
+    }
+  }
+
+  // Self-hosted bytecode heuristic (riskScore.js/bytecodeAnalysis.js) —
+  // only ever populated when GoPlus has nothing for this chain at all, same
+  // reasoning as the LP-lock fallback above. Provisional threshold, not
+  // backtested like the numeric filters — see bytecodeAnalysis.js.
+  if (filters.blockUnknownBytecode && riskResult.bytecodeAnalysis) {
+    const { unknownSelectorCount } = riskResult.bytecodeAnalysis;
+    if (unknownSelectorCount >= UNKNOWN_SELECTOR_REJECT_THRESHOLD) {
+      reasons.push(`${unknownSelectorCount} unrecognized functions in bytecode — likely undocumented custom logic`);
+    }
+  }
+
+  // Unconditional and chain-independent (works with or without GoPlus
+  // coverage) — see dangerousFunctions.js. No legitimate token needs a
+  // function that can move tokens out of an arbitrary holder's balance;
+  // presence alone is the same tier as the sell-tax/owner_change_balance
+  // checks above.
+  if (riskResult.dangerousFunctions?.confiscationFunctions?.length > 0) {
+    reasons.push(`Contract exposes an arbitrary balance-manipulation function: ${riskResult.dangerousFunctions.confiscationFunctions.join(", ")}`);
+  }
+
+  // Same tier as the confiscation check above, and for the same reason: a
+  // capability no point-in-time behavioural probe can see, because the trap
+  // isn't armed when we look. An owner-controlled blacklist or sell-tax
+  // rewrite means our exit exists only at the owner's discretion.
+  //
+  // This is the check that HOOPLA (Robinhood, 2026-08-13) needed and didn't
+  // have — it passed probeSellability (0/8 blocked) and a real simulated
+  // round trip (0.6% loss) while carrying blacklistAccount + updateSellFees
+  // in its bytecode. Toggle so it can be relaxed deliberately rather than by
+  // accident, but default on: measured prevalence is ~3% of called tokens,
+  // so the recall cost is roughly one call in forty.
+  if (filters.blockSellRestrictionFunctions !== false) {
+    const sellBlocking = riskResult.dangerousFunctions?.sellBlockingFunctions || [];
+    if (sellBlocking.length > 0) {
+      reasons.push(`Owner can block or tax away our exit: ${sellBlocking.join(", ")}`);
+    }
+  }
+
+  if (security) {
+    const holderCount = Number(security.holder_count) || 0;
+    if (holderCount < filters.minHolderCount) reasons.push(`Holder count ${holderCount} below minimum ${filters.minHolderCount}`);
+
+    const top10Pct = (security.holders || []).slice(0, 10).reduce((s, h) => s + (Number(h.percent) || 0), 0) * 100;
+    if (top10Pct > filters.maxTop10HolderPercent) reasons.push(`Top 10 holders own ${top10Pct.toFixed(0)}% (max ${filters.maxTop10HolderPercent}%)`);
+
+    const creatorPct = (Number(security.creator_percent) || 0) * 100;
+    if (creatorPct > filters.maxCreatorHolderPercent) reasons.push(`Creator holds ${creatorPct.toFixed(0)}% (max ${filters.maxCreatorHolderPercent}%)`);
+
+    if (filters.requireNotHoneypot && isTrue(security.is_honeypot)) reasons.push("Flagged as honeypot");
+    // Unconditional, unlike the boolean check above — a reported sell tax
+    // this high means a sale returns almost nothing back regardless of
+    // whether GoPlus's own is_honeypot heuristic happened to catch it.
+    const sellTax = Number(security.sell_tax) || 0;
+    if (sellTax >= 0.5) reasons.push(`Sell tax ${(sellTax * 100).toFixed(0)}% — effectively unsellable`);
+    // Same tier as the sell-tax check above — this is the exact mechanism
+    // that drained the wallet on catnip (arbitrary balance rewrite bypassing
+    // Transfer events), so it's unconditional too, not gated by a toggle.
+    if (isTrue(security.owner_change_balance)) reasons.push("Owner can directly alter holder balances");
+    if (filters.requireOpenSource && !isTrue(security.is_open_source)) reasons.push("Contract not open source");
+    if (filters.blockMintable && isTrue(security.is_mintable)) reasons.push("Token supply is mintable");
+  }
+
+  // Deliberately outside the `if (security)` block above — GoPlus doesn't
+  // cover this chain at all (security is always null here), so nesting this
+  // inside that block made it a permanent no-op regardless of the setting.
+  // Prefer GoPlus's lp_holders when available (other chains); fall back to
+  // the on-chain check (riskScore.js) otherwise.
+  if (filters.requireLpLockedOrBurned) {
+    const lpHolders = security?.lp_holders || [];
+    if (lpHolders.length > 0) {
+      const lockedPct = lpHolders.reduce((sum, h) => {
+        const locked = isTrue(h.is_locked) || h.tag === "Burn Address";
+        return sum + (locked ? Number(h.percent) || 0 : 0);
+      }, 0);
+      if (lockedPct < 0.5) reasons.push("LP not majority locked/burned");
+    } else if (lpLock) {
+      if (lpLock.lockedFraction < 0.5) {
+        reasons.push(`LP not majority locked/burned (on-chain check: ${(lpLock.lockedFraction * 100).toFixed(0)}% locked)`);
+      }
+    } else {
+      // No length guard here on purpose — treating "no data from either
+      // source" as "skip the check" let every fresh launch through
+      // regardless of this setting, which is exactly backwards for the
+      // freshest (highest-risk) tokens.
+      reasons.push("LP lock status unknown (no data available) — treated as unlocked");
+    }
+  }
+
+  return { pass: reasons.length === 0, reasons, filters };
+}

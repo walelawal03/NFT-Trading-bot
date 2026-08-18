@@ -181,9 +181,32 @@ const UPGRADE_SELECTORS = {
   "0x0900f010": "upgrade(address)",
 };
 
-// EIP-1167 minimal proxy — same 45-byte template the token module resolves.
-const CLONE_PREFIX = "363d3d373d3d3d363d73";
-const CLONE_SUFFIX = "5af43d82803e903d91602b57fd5bf3";
+// Minimal-proxy templates. Every one of these bakes a single implementation
+// address into its own runtime code and has no setter, so all are immutable
+// — resolving them is about reading the right code, not upgradeability.
+//
+// The token-side module knows only the canonical 45-byte EIP-1167 template.
+// That is not enough here: AMEX PASSPORT (0x96cebb59..., Base, 3.5M supply)
+// is a 44-byte Solady LibClone proxy, and against a canonical-only match it
+// resolved to nothing, extracted 0 selectors, and scored UNKNOWN at 17/35 —
+// a live collection reading as unscannable, including a freezeMetadata()
+// it could not see.
+//
+// Measured prevalence in a 51-contract live sample (2026-08-18): 1/29 on
+// Base, 0/22 on Robinhood, against 1 and 9 canonical clones respectively.
+// So this is an uncommon template, not a dominant one — it earns its row
+// because the failure is silent and total, not because it is frequent.
+//
+// Both templates are the same delegatecall-and-return-everything semantics;
+// Solady's saves a byte with a different opcode prelude. Matching is exact
+// on length, prefix and suffix, so a contract that merely happens to start
+// with these bytes cannot be mistaken for a clone.
+const CLONE_TEMPLATES = [
+  // EIP-1167 canonical — 45 bytes.
+  { via: "eip1167", prefix: "363d3d373d3d3d363d73", suffix: "5af43d82803e903d91602b57fd5bf3" },
+  // Solady LibClone — 44 bytes.
+  { via: "eip1167_solady", prefix: "3d3d3d3d363d3d37363d73", suffix: "5af43d3d93803e602a57fd5bf3" },
+];
 
 // EIP-1967 standard slots (keccak256(label) - 1) and EIP-1822's PROXIABLE
 // slot. Computed, not copied — verify with:
@@ -206,10 +229,17 @@ function addressFromSlot(word) {
   return /^0x0{40}$/.test(addr) ? null : addr;
 }
 
+// Returns { address, via } for a recognised minimal proxy, else null. The
+// expected length is derived from each template rather than hardcoded, so
+// adding a variant is one row above and nothing here.
 function resolveCloneTarget(bytecodeHex) {
   const hex = bytecodeHex.slice(2).toLowerCase();
-  if (hex.length !== 90 || !hex.startsWith(CLONE_PREFIX) || !hex.endsWith(CLONE_SUFFIX)) return null;
-  return "0x" + hex.slice(20, 60);
+  for (const { via, prefix, suffix } of CLONE_TEMPLATES) {
+    if (hex.length !== prefix.length + 40 + suffix.length) continue;
+    if (!hex.startsWith(prefix) || !hex.endsWith(suffix)) continue;
+    return { address: "0x" + hex.slice(prefix.length, prefix.length + 40), via };
+  }
+  return null;
 }
 
 // Reads a live token URI to find out where metadata actually points. Four
@@ -284,7 +314,12 @@ async function resolveImplementation(provider, address, base) {
     // A clone is immutable — it delegates to one fixed address baked into
     // its own bytecode and there is no setter. Resolving it is about
     // reading the right code, not about upgradeability.
-    return { code: await provider.getCode(clone), via: "eip1167", implementation: clone, upgradeable: false };
+    return {
+      code: await provider.getCode(clone.address),
+      via: clone.via,
+      implementation: clone.address,
+      upgradeable: false,
+    };
   }
 
   const impl = addressFromSlot(base.implWord) || addressFromSlot(base.proxiableWord);

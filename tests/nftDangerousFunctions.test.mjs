@@ -165,6 +165,41 @@ cases.push(["EIP-1167 clone resolves to implementation code", async () => {
   assert.deepEqual(scan.seizure, ["seize(uint256)"], "must read the impl, not the 45-byte stub");
 }]);
 
+// Regression: AMEX PASSPORT (0x96cebb59..., Base) is a 44-byte Solady
+// LibClone proxy. Against a canonical-only match it extracted 0 selectors
+// and scored UNKNOWN at 17/35 — a live 3.5M-supply collection reading as
+// unscannable. The seize() below is the point: it lives in the impl, so a
+// resolver that stops at the 44-byte stub reports a clean contract.
+cases.push(["Solady LibClone (44-byte) resolves to implementation code", async () => {
+  A = nextAddr();
+  const cloneCode = "0x3d3d3d3d363d3d37363d73" + IMPL.slice(2).toLowerCase() + "5af43d3d93803e602a57fd5bf3";
+  assert.equal((cloneCode.length - 2) / 2, 44, "template must be 44 bytes");
+  PROVIDER = new StubProvider({
+    code: {
+      [A.toLowerCase()]: cloneCode,
+      [IMPL.toLowerCase()]: fakeRuntime([...ERC721_BASE, "seize(uint256)"]),
+    },
+    calls: { [`${A.toLowerCase()}:${sel("tokenURI(uint256)")}`]: encStr("ipfs://bafy/1.json") },
+  });
+  const scan = await detectNftDangerousFunctions(CHAIN, A);
+  assert.equal(scan.proxy.via, "eip1167_solady");
+  assert.equal(scan.proxy.implementation.toLowerCase(), IMPL.toLowerCase());
+  assert.equal(scan.proxy.upgradeable, false, "clones are immutable");
+  assert.ok(scan.checked, "must not fall through to unknown");
+  assert.deepEqual(scan.seizure, ["seize(uint256)"], "must read the impl, not the 44-byte stub");
+}]);
+
+// A near-miss must not resolve: same prefix, one byte short of any template.
+cases.push(["a truncated clone stub is not mistaken for a proxy", async () => {
+  A = nextAddr();
+  PROVIDER = new StubProvider({
+    code: { [A.toLowerCase()]: "0x3d3d3d3d363d3d37363d73" + IMPL.slice(2).toLowerCase() + "5af43d3d93803e602a57fd5b" },
+  });
+  const scan = await detectNftDangerousFunctions(CHAIN, A);
+  assert.notEqual(scan.proxy.via, "eip1167_solady");
+  assert.notEqual(scan.proxy.via, "eip1167");
+}]);
+
 cases.push(["EIP-1967 proxy resolves and is marked upgradeable", async () => {
   A = nextAddr();
   PROVIDER = new StubProvider({

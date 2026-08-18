@@ -2,7 +2,6 @@ import { computeRiskScore } from "./risk/riskScore.js";
 import { applyFilter } from "./filters/filter.js";
 import {
   recordCall,
-  recordDeployerOutcome,
   hasBeenCalled,
   findRecentCallsByName,
   hasHoneypotNotification,
@@ -74,9 +73,16 @@ export async function evaluateToken(bot, { chain, dexName, pairAddress, tokenAdd
     priceImpactPct,
   });
 
-  if (riskResult.deployerAddress) {
-    recordDeployerOutcome(riskResult.deployerAddress, { lowScore: riskResult.score < 40 });
-  }
+  // The deployer's record is NOT written here any more. This used to call
+  // recordDeployerOutcome(addr, { lowScore: riskResult.score < 40 }) — on
+  // every evaluation, passing or not — and riskScore.js read that counter
+  // back to adjust the next score, making a deployer's reputation our own
+  // verdict reflected at us and unfalsifiable by anything on-chain.
+  //
+  // What replaces it: the deployer address is stored on the call below, and
+  // riskScore.js reads getTokenDeployerRealizedRecord, which joins those
+  // calls to closed paper trades. Reputation now comes from realized exits,
+  // so it stays empty until trades actually close.
 
   if (!pass) {
     return { pass: false, reasons, riskResult };
@@ -233,6 +239,7 @@ export async function evaluateToken(bot, { chain, dexName, pairAddress, tokenAdd
     riskGrade: riskResult.grade,
     telegramMessageId: messageId,
     calledAt: Date.now(),
+    deployerAddress: riskResult.deployerAddress || null,
     // Snapshot of the scoring inputs, for future preset/algorithm analysis —
     // see the note in db.js on why this wasn't captured historically.
     callLiquidityUsd: riskResult.pair?.liquidityUsd ?? null,

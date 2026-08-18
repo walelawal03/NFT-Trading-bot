@@ -2,7 +2,7 @@ import { isAddress } from "ethers";
 import { getTokenSecurity } from "./goplus.js";
 import { getBestPair, pairSummary } from "./dexscreener.js";
 import { getContractCreator, getDeployerTxCount } from "./explorer.js";
-import { getDeployerHistory } from "../store/db.js";
+import { getTokenDeployerRealizedRecord } from "../store/db.js";
 import { checkLpLock } from "./lpLock.js";
 import { analyzeContractBytecode, UNKNOWN_SELECTOR_REJECT_THRESHOLD } from "./bytecodeAnalysis.js";
 import { detectDangerousFunctions } from "./dangerousFunctions.js";
@@ -186,18 +186,32 @@ async function scoreDeployerHistory(chain, tokenAddress, flags) {
     return { points: WEIGHTS.deployerHistory * NO_DATA_FACTOR, deployerAddress: null };
   }
 
-  const localHistory = getDeployerHistory(creation.deployerAddress);
+  // Realized outcomes only. This read deployer_history.low_score_count until
+  // it was found to be a closed loop: pipeline.js wrote that counter from
+  // THIS function's own output (`lowScore: riskResult.score < 40`), so a
+  // deployer's reputation was our previous verdict handed back to us. No
+  // on-chain fact was an input, so no on-chain fact could ever correct it.
+  //
+  // Now it comes from closed paper trades — a real exit at a real price.
+  // See getTokenDeployerRealizedRecord for why the rug label keys on
+  // exit_reason rather than the percentage alone (the stop-loss truncates
+  // the loss distribution, so -100 stale_price and -50 stop_loss are
+  // different events that a naive threshold would merge).
+  const record = getTokenDeployerRealizedRecord(creation.deployerAddress);
   let points = WEIGHTS.deployerHistory;
 
-  if (localHistory && localHistory.tokens_deployed > 0) {
-    const badRatio = localHistory.low_score_count / localHistory.tokens_deployed;
-    if (badRatio > 0.5) {
-      points = 2;
-      flags.push(`Deployer has ${localHistory.low_score_count}/${localHistory.tokens_deployed} prior low-risk-score tokens`);
-    } else if (badRatio > 0.2) {
-      points -= 10;
-      flags.push("Deployer has some prior low-scoring tokens");
-    }
+  if (record.tokens === 0) {
+    // Nothing has closed for this deployer. Unproven is not the same as
+    // good, and it earns nothing in either direction.
+    flags.push("Deployer has no tokens with a closed trade yet — unproven, not clean");
+  } else if (record.ruggedRatio > 0.5) {
+    points = 2;
+    flags.push(`Deployer: ${record.rugged}/${record.tokens} prior tokens ended in a rug or total loss`);
+  } else if (record.ruggedRatio > 0.2) {
+    points -= 10;
+    flags.push(`Deployer: ${record.rugged}/${record.tokens} prior tokens ended in a rug or total loss`);
+  } else {
+    flags.push(`Deployer: ${record.tokens} prior token(s) closed, none rugged (avg ${record.avgPct.toFixed(0)}%)`);
   }
 
   const chainStats = await getDeployerTxCount(chain, creation.deployerAddress).catch(() => null);

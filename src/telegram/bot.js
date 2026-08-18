@@ -3355,6 +3355,10 @@ export async function postTradeCard(bot, { caption, imageBuffer }) {
 // when one is available, falling back to a plain text message otherwise —
 // unlike token calls, an NFT call has a real, usually-distinctive image
 // worth showing inline rather than just linking out.
+// Image hosts that have refused to serve Telegram, learned at runtime. See
+// the note in postNftCall for why this is a host set and not a URL set.
+const photoUnsupportedHosts = new Set();
+
 export async function postNftCall(bot, { chain, contractAddress, riskResult, source, triggerWalletLabel }) {
   // Scoring/recording/paper-trading for this collection still happens
   // upstream in nftPipeline.js regardless — this only mutes the message
@@ -3368,20 +3372,40 @@ export async function postNftCall(bot, { chain, contractAddress, riskResult, sou
   const caption = truncateCaption(message);
   const imageUrl = riskResult.imageUrl;
 
+  // Telegram fetches a photo URL server-side, and OpenSea's CDN refuses it:
+  // every call with an i2c.seadn.io image came back "400: Bad Request: failed
+  // to get HTTP URL content" (observed on every one of 7 consecutive calls,
+  // 2026-08-18). The text fallback below caught all of them, so nothing was
+  // lost — but each call still paid a doomed API round trip and logged an
+  // error, which trains you to ignore the error log.
+  //
+  // So remember which image hosts have refused and stop asking them. Keyed by
+  // host rather than URL because the failure is a property of the CDN, not of
+  // one image, and held in memory only: a restart re-tests, so a host that
+  // starts working is picked up without a code change.
+  const imageHost = imageUrl ? URL.parse(imageUrl)?.host ?? null : null;
+  const usePhoto = imageUrl && !(imageHost && photoUnsupportedHosts.has(imageHost));
+
   let primaryMessageId = null;
   // isNftNotificationsEnabled above decides WHETHER an NFT call is sent at
   // all; the channel toggle still decides WHERE, same as every other sender.
   for (const destination of activeDestinations()) {
     try {
-      const sent = imageUrl
+      const sent = usePhoto
         ? await bot.telegram.sendPhoto(destination, imageUrl, { caption, parse_mode: "Markdown" })
         : await bot.telegram.sendMessage(destination, message, { parse_mode: "Markdown" });
       if (destination === config.telegram.chatId) primaryMessageId = sent.message_id;
     } catch (err) {
+      // Only a fetch failure condemns the host. A caption-too-long or
+      // rate-limit error says nothing about whether the CDN serves Telegram.
+      if (usePhoto && imageHost && /failed to get HTTP URL content|wrong file identifier|WEBPAGE_MEDIA_EMPTY/i.test(err.message)) {
+        photoUnsupportedHosts.add(imageHost);
+        console.error(`[nft] ${imageHost} won't serve images to Telegram — sending text only from now on`);
+      }
       console.error(`Failed to send NFT call to ${destination}:`, err.message);
       // A bad/unreachable image URL shouldn't lose the call entirely — retry
       // that one destination as a plain text message.
-      if (imageUrl) {
+      if (usePhoto) {
         try {
           const sent = await bot.telegram.sendMessage(destination, message, { parse_mode: "Markdown" });
           if (destination === config.telegram.chatId) primaryMessageId = sent.message_id;

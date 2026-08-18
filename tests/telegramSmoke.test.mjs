@@ -168,6 +168,62 @@ await t("an unknown filter key is refused rather than written", async () => {
   assert.match(out, /Unknown filter key/);
 });
 
+// Observed live: OpenSea's CDN refuses Telegram's server-side fetch, so every
+// call paid a doomed sendPhoto before falling back to text. The host is
+// condemned after one such failure — and ONLY for that failure, or an
+// unrelated hiccup would silently kill images everywhere forever.
+await t("a CDN that refuses Telegram is dropped to text after one failure", async () => {
+  const { postNftCall } = await import("../src/telegram/bot.js");
+  const riskResult = {
+    score: 50, grade: "C", label: "Medium Risk", flags: [],
+    breakdown: { contractSafety: 30, marketplaceLiquidity: 0, holderDistribution: 6, deployerHistory: 10 },
+    name: "Test", slug: null, stats: null, totalSupply: null,
+    imageUrl: "https://i2c.seadn.io/base/0xabc/img",
+    contractVerdict: { fatal: false, unknown: false, deduction: 5, flags: [] },
+  };
+  const args = { chain: { key: "base", label: "Base" }, contractAddress: "0x" + "a".repeat(40), riskResult, source: "new_collection" };
+
+  const origin = Telegram.prototype.callApi;
+  let photoAttempts = 0;
+  Telegram.prototype.callApi = async (method, payload) => {
+    if (method === "sendPhoto") { photoAttempts++; throw new Error("400: Bad Request: failed to get HTTP URL content"); }
+    return { message_id: 1, chat: { id: CHAT }, text: payload?.text };
+  };
+
+  await postNftCall(bot, args);
+  assert.equal(photoAttempts, 1, "first call should try the photo");
+
+  await postNftCall(bot, args);
+  assert.equal(photoAttempts, 1, "second call must not retry a host already known to refuse");
+
+  Telegram.prototype.callApi = origin;
+});
+
+await t("an unrelated send error does not condemn the host", async () => {
+  const { postNftCall } = await import("../src/telegram/bot.js");
+  const riskResult = {
+    score: 50, grade: "C", label: "Medium Risk", flags: [],
+    breakdown: { contractSafety: 30, marketplaceLiquidity: 0, holderDistribution: 6, deployerHistory: 10 },
+    name: "Test", slug: null, stats: null, totalSupply: null,
+    imageUrl: "https://images.example-ok.test/x.png",
+    contractVerdict: { fatal: false, unknown: false, deduction: 5, flags: [] },
+  };
+  const args = { chain: { key: "base", label: "Base" }, contractAddress: "0x" + "b".repeat(40), riskResult, source: "new_collection" };
+
+  const origin = Telegram.prototype.callApi;
+  let photoAttempts = 0;
+  Telegram.prototype.callApi = async (method, payload) => {
+    if (method === "sendPhoto") { photoAttempts++; throw new Error("429: Too Many Requests: retry after 5"); }
+    return { message_id: 1, chat: { id: CHAT }, text: payload?.text };
+  };
+
+  await postNftCall(bot, args);
+  await postNftCall(bot, args);
+  assert.equal(photoAttempts, 2, "a rate limit says nothing about whether the CDN serves Telegram");
+
+  Telegram.prototype.callApi = origin;
+});
+
 await t("/nftscore is still present and unchanged", async () => {
   const out = texts(await send("/nftscore"));
   assert.ok(out.length > 0, "/nftscore must still respond");

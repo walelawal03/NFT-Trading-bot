@@ -2,6 +2,7 @@ import { getNftSecurity } from "./goplus.js";
 import { getContract, getCollection, getCollectionStats } from "./opensea.js";
 import { getContractCreator, getDeployerTxCount } from "./explorer.js";
 import { getNftDeployerRealizedRecord } from "../store/db.js";
+import { detectNftDangerousFunctions, assessNftContractRisk } from "./nftDangerousFunctions.js";
 
 // Same weighting shape as risk/riskScore.js (token side) — contract safety
 // carries the most weight, deployer history the least directly-observable
@@ -19,25 +20,39 @@ const NO_DATA_FACTOR = 0.3;
 
 const isTrue = (v) => v === "1" || v === 1 || v === true;
 
-function scoreContractSafety(sec, flags) {
-  if (!sec) return { points: WEIGHTS.contractSafety * NO_DATA_FACTOR, fatal: false };
+// Wall-clock ceiling for the bytecode scan on the automated path. Tighter
+// than the 8s /nftcheck uses on purpose: a human waiting on a Telegram reply
+// would rather wait two seconds for a real answer, but the pipeline is
+// scoring every collection the watcher sees and cannot spend that per
+// candidate. One round trip for a plain contract, two for a proxy — 2.5s is
+// several times the observed 270-950ms even on a cold proxy.
+const SCAN_BUDGET_MS = 2500;
 
-  if (isTrue(sec.malicious_nft_contract)) {
+// Contract safety is now read from the contract itself.
+//
+// It used to come from GoPlus, which does not cover Robinhood Chain at all —
+// nft_security returns null there, the category fell through to
+// NO_DATA_FACTOR, and the primary target chain scored a free 10.5 points for
+// nothing. A bytecode scan has no such gap: it is plain eth_call/eth_getCode
+// and works identically on any EVM chain, including a contract deployed
+// sixty seconds ago that no aggregator has indexed.
+//
+// assessNftContractRisk caps its deduction at exactly WEIGHTS.contractSafety
+// so it drops in here without rebalancing the other three categories.
+//
+// GoPlus is kept as an ADDITIONAL fatal signal where it does answer. It can
+// only ever take points away now — its absence awards nothing, which is the
+// whole point of the change.
+function scoreContractSafety(scanVerdict, sec, flags) {
+  if (isTrue(sec?.malicious_nft_contract)) {
     flags.push("🚨 Flagged as a malicious contract — score forced to 0");
     return { points: 0, fatal: true };
   }
 
-  let points = WEIGHTS.contractSafety;
-  const deduct = (amount, flag) => {
-    points -= amount;
-    flags.push(flag);
-  };
+  for (const f of scanVerdict.flags) flags.push(f);
 
-  if (!isTrue(sec.nft_open_source)) deduct(10, "Contract not open source / verified");
-  if (isTrue(sec.nft_proxy)) deduct(7, "Upgradeable proxy contract");
-  if (!isTrue(sec.nft_verified) && sec.nft_verified != null) deduct(6, "Contract not marked verified by GoPlus");
-
-  return { points: Math.max(0, points), fatal: false };
+  const points = Math.max(0, WEIGHTS.contractSafety - scanVerdict.deduction);
+  return { points, fatal: scanVerdict.fatal };
 }
 
 function scoreMarketplaceLiquidity(collection, stats, flags) {
@@ -119,8 +134,15 @@ async function scoreDeployerHistory(chain, contractAddress, flags) {
   let points = WEIGHTS.deployerHistory;
 
   if (record.collections === 0) {
-    // No settled history is not a good history. No credit either way, and
-    // said out loud so it can't be misread as a clean record.
+    // No settled history is not a good history, so it cannot earn the full
+    // category. Three rungs, deliberately ordered: deployer unidentifiable
+    // scores NO_DATA_FACTOR (6/20, above), identified-but-unproven scores
+    // half (10/20, here), and a clean settled record scores 20. Leaving
+    // unproven at 20 — which is what this did — meant every deployer alive
+    // started at maximum and the category could only ever punish, never
+    // distinguish. At mint time that is the common case, so it also inflated
+    // exactly the scores a mint-time filter has to threshold on.
+    points = Math.round(WEIGHTS.deployerHistory * 0.5);
     flags.push("Deployer has no collections with a settled outcome yet — unproven, not clean");
   } else if (record.ruggedRatio > 0.5) {
     points = 2;
@@ -164,16 +186,26 @@ export async function computeNftRiskScore(chain, contractAddress) {
   const slug = contractInfo?.slug || null;
   if (!slug) flags.push("⚠️ Could not resolve an OpenSea collection for this contract — marketplace data unavailable");
 
-  const [security, collection] = await Promise.all([
+  // The scan runs alongside the aggregator lookups rather than after them:
+  // it depends on nothing they return, and it is the one source here that
+  // still answers when OpenSea and GoPlus don't.
+  const [security, collection, scan] = await Promise.all([
     getNftSecurity(chain.goplusChainId, contractAddress).catch(() => null),
     slug ? getCollection(slug).catch(() => null) : null,
+    detectNftDangerousFunctions(chain, contractAddress, { budgetMs: SCAN_BUDGET_MS }).catch(() => null),
   ]);
   const stats = slug ? await getCollectionStats(slug).catch(() => null) : null;
 
   const name = collection?.name || contractInfo?.name || null;
   const totalSupply = collection?.totalSupply ?? null;
 
-  const { points: contractSafety, fatal } = scoreContractSafety(security, flags);
+  // A thrown scan is not a clean scan. assessNftContractRisk already treats
+  // checked:false as unknown-and-penalised, so hand it a shaped failure
+  // rather than letting a null quietly skip the category.
+  const scanVerdict = assessNftContractRisk(
+    scan ?? { checked: false, reason: "Contract scan threw", timedOut: false }
+  );
+  const { points: contractSafety, fatal } = scoreContractSafety(scanVerdict, security, flags);
   const marketplaceLiquidity = scoreMarketplaceLiquidity(collection, stats, flags);
   const holderDistribution = scoreHolderDistribution(stats, totalSupply, flags);
   const { points: deployerHistory, deployerAddress } = await scoreDeployerHistory(chain, contractAddress, flags);
@@ -200,5 +232,10 @@ export async function computeNftRiskScore(chain, contractAddress) {
     collection,
     stats,
     deployerAddress,
+    // The raw scan and its verdict, so the filter can reject on a specific
+    // capability rather than only on the aggregate score, and so Telegram
+    // can show what was actually found in the bytecode.
+    contractScan: scan,
+    contractVerdict: scanVerdict,
   };
 }

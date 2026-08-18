@@ -201,8 +201,13 @@ async function scoreDeployerHistory(chain, tokenAddress, flags) {
   let points = WEIGHTS.deployerHistory;
 
   if (record.tokens === 0) {
-    // Nothing has closed for this deployer. Unproven is not the same as
-    // good, and it earns nothing in either direction.
+    // Nothing has closed for this deployer. Unproven is not good, so it does
+    // not earn the full category — same three rungs as the NFT side:
+    // unidentifiable scores NO_DATA_FACTOR (6/20, above), unproven scores
+    // half (10/20, here), a clean closed record scores 20. Leaving this at
+    // 20 meant every deployer started at maximum and the category could only
+    // punish, never distinguish.
+    points = Math.round(WEIGHTS.deployerHistory * 0.5);
     flags.push("Deployer has no tokens with a closed trade yet — unproven, not clean");
   } else if (record.ruggedRatio > 0.5) {
     points = 2;

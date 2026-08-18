@@ -230,6 +230,75 @@ await t("/nftscore is still present and unchanged", async () => {
   assert.ok(!/nftcheck/.test(out), "/nftscore must not have been merged into the scan");
 });
 
+// ── Mint configurator ───────────────────────────────────────────────────
+// The controls must never offer a number the contract didn't publish, and
+// the execution buttons must refuse out loud rather than doing nothing.
+await t("/mint rejects a bad address and names the chains", async () => {
+  const out = texts(await send("/mint notanaddress"));
+  assert.match(out, /Usage: \/mint/);
+  assert.match(out, /robinhood/);
+});
+
+await t("/mint refuses a chain this bot does not watch", async () => {
+  const out = texts(await send("/mint ethereum 0x000000000000000000000000000000000000dEaD"));
+  assert.match(out, /Unknown chain/);
+});
+
+await t("the quantity stepper clamps to the contract's max per wallet", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  const detect = {
+    checked: true, name: "Test Drop", symbol: "T", standard: "seadrop",
+    totalSupply: 1n, maxSupply: 100n, soldOut: false, mintable: true,
+    phase: { kind: "public", priceWei: 1000000000000000n, startsAt: new Date(), endsAt: new Date(Date.now() + 3600e3), maxPerWallet: 3, feeBps: 0, live: true },
+    mintVia: { target: "0x" + "1".repeat(40), signature: "mintPublic(...)", note: "n" },
+    proxy: null,
+  };
+  mintSession.startSession(CHAT, { chain: { key: "robinhood", label: "Robinhood Chain" }, contractAddress: "0x" + "a".repeat(40), detect });
+
+  assert.equal(mintSession.getSession(CHAT).quantity, 3, "should open at the cap");
+  await tap("mint:qty:1");
+  assert.equal(mintSession.getSession(CHAT).quantity, 3, "must not exceed the contract's cap");
+  await tap("mint:qty:-1");
+  assert.equal(mintSession.getSession(CHAT).quantity, 2);
+  await tap("mint:qty:max");
+  assert.equal(mintSession.getSession(CHAT).quantity, 3);
+});
+
+await t("wallet count cannot exceed the loaded roster", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  await tap("mint:wal:1");
+  assert.equal(mintSession.getSession(CHAT).wallets, 0, "no wallets loaded means it cannot go above 0");
+});
+
+await t("a price override is applied, then clearable back to the contract price", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  await tap("mint:px:1000000000000000");
+  assert.equal(mintSession.getSession(CHAT).priceOverrideWei, 2000000000000000n);
+  await tap("mint:px:clear");
+  assert.equal(mintSession.getSession(CHAT).priceOverrideWei, null, "cleared means null, not a number that happens to match");
+});
+
+await t("a price override can never go negative", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  for (let i = 0; i < 5; i++) await tap("mint:px:-10000000000000000");
+  assert.ok(mintSession.getSession(CHAT).priceOverrideWei >= 0n);
+});
+
+await t("CONFIRM MINT refuses out loud instead of pretending", async () => {
+  const out = texts(await tap("mint:confirm"));
+  assert.match(out, /not wired up yet/i);
+  assert.match(out, /holds no/i, "must say why it cannot send");
+  assert.ok(!/sent|submitted|broadcast/i.test(out), "must not imply a transaction went out");
+});
+
+await t("the config text surfaces blockers above the buttons", async () => {
+  const { buildMintConfigText } = await import("../src/telegram/mintKeyboard.js");
+  const mintSession = await import("../src/mint/mintSession.js");
+  const c = mintSession.getSession(CHAT);
+  const text = buildMintConfigText({ ...c, detect: { ...c.detect, soldOut: true } });
+  assert.match(text, /Cannot mint:.*sold out/);
+});
+
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -31,13 +31,22 @@ const filtersPath = path.join(getDataDir(), "nftFilters.json");
 // ordinary upgradeable proxies. The number is the gap in the data, not a
 // preference.
 //
-// CAVEAT, and it is a sharp one: deployerHistory is 10 when the deployer
-// resolves (unproven) and 6 when it cannot (no ETHERSCAN_API_KEY, or the
-// Blockscout fallback failing). That 4-point shift moves the whole baseline
-// from 51 to 47 and, at minRiskScore 40, moves rejection from 14% to 44% of
-// the same 50 contracts — without a single contract having changed. If
-// deployer resolution is not working, this threshold is far stricter than it
-// looks. Verify ETHERSCAN_API_KEY is set before trusting the 40.
+// CAVEAT, and it is a sharp one: deployerHistory is 10 when the controller
+// resolves (unproven) and 6 when it cannot. That 4-point shift moves the
+// whole baseline from 51 to 47 and, at minRiskScore 40, moves rejection from
+// 14% to 44% of the same 50 contracts — without a single contract having
+// changed.
+//
+// This was live for a while. Keyed on the explorer, resolution failed on both
+// chains (Etherscan's free plan excludes Base; Blockscout rate-limited
+// Robinhood permanently), so the real baseline was 47 and this threshold was
+// silently rejecting 44%. Since the key moved to owner() — one eth_call, no
+// quota, 8/8 coverage on Robinhood — resolution succeeds, the baseline is 51
+// again, and 40 rejects the 14% it was calibrated to. Re-measured 2026-08-18.
+//
+// So the number to watch is not an API key any more; it is whether
+// controllerAddress comes back non-null. If it ever starts returning null in
+// bulk, this threshold silently tightens by 30 points of rejection rate.
 //
 // The two contract gates below do not have this problem: they read the scan
 // verdict directly and are independent of the score and of every aggregator.

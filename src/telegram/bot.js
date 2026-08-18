@@ -75,6 +75,8 @@ import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftD
 import { buildNftScanMessage } from "./formatNftScan.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
+import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
+import * as mintSession from "../mint/mintSession.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
 import { loadNftFilters, saveNftFilters } from "../filters/nftFilter.js";
@@ -2729,6 +2731,79 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.reply(`Send the new value for *${key}* (current: ${filters[key]}):`, { parse_mode: "Markdown" });
   });
 
+  // ── Mint configuration ────────────────────────────────────────────────
+  // Every control re-renders from the session, so the numbers on screen are
+  // always the ones a mint would use. Nothing here signs or sends.
+  const redrawMint = async (ctx, config) => {
+    if (!config) return ctx.answerCbQuery("That mint session expired — run /mint again.");
+    await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config));
+  };
+
+  bot.action("mint:noop", (ctx) => ctx.answerCbQuery());
+
+  bot.action(/^mint:qty:(-?\d+|max)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const arg = ctx.match[1];
+    const config = arg === "max"
+      ? mintSession.setQuantityMax(ctx.chat.id)
+      : mintSession.adjustQuantity(ctx.chat.id, Number(arg));
+    await redrawMint(ctx, config);
+  });
+
+  bot.action(/^mint:wal:(-?\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    await redrawMint(ctx, mintSession.adjustWallets(ctx.chat.id, Number(ctx.match[1])));
+  });
+
+  bot.action(/^mint:px:(clear|-?\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const arg = ctx.match[1];
+    const config = arg === "clear"
+      ? mintSession.clearPriceOverride(ctx.chat.id)
+      : mintSession.adjustPriceOverride(ctx.chat.id, BigInt(arg));
+    await redrawMint(ctx, config);
+  });
+
+  // Execution is not built. These refuse plainly rather than doing nothing,
+  // showing a spinner, or — worst — implying a transaction went out. A mint
+  // button that quietly does nothing is indistinguishable from one that
+  // failed silently, and this bot has no signing path at all yet.
+  const notArmed = (what) => async (ctx) => {
+    await ctx.answerCbQuery();
+    const wallets = mintSession.loadMintWallets().length;
+    await ctx.reply(
+      [
+        `⛔️ *${what} is not wired up yet.*`,
+        "",
+        "Detection and configuration are live; signing is not. This bot holds no",
+        "private key, so nothing here can send a transaction.",
+        "",
+        `Wallets loaded: ${wallets}`,
+        "Next step is the executor — and that is the part that spends real ETH,",
+        "so it gets built deliberately rather than quietly.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+  };
+
+  bot.action("mint:confirm", notArmed("CONFIRM MINT"));
+  bot.action("mint:sweep", notArmed("SWEEP MINT"));
+  bot.action("mint:schedule", notArmed("Scheduled auto-mint"));
+
+  bot.action("mint:eligibility", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — run /mint again.");
+    const wallets = mintSession.loadMintWallets();
+    if (wallets.length === 0) {
+      return ctx.reply(
+        "No wallets loaded. Add addresses to `data/mintWallets.json` as `{ \"wallets\": [\"0x…\"] }` to check eligibility.",
+        { parse_mode: "Markdown" }
+      );
+    }
+    await ctx.reply(`Eligibility checking is not wired up yet — ${wallets.length} wallet(s) loaded.`);
+  });
+
   bot.action(/^nftfiltertoggle:(.+)$/, async (ctx) => {
     await ctx.answerCbQuery();
     if (!isAdmin(ctx)) return ctx.reply("Not authorized to change filters.");
@@ -3062,7 +3137,14 @@ export function createBot(stats, chainControls, digestControls) {
     try {
       const chain = { key: chainKey, ...CHAINS[chainKey] };
       const detect = await detectNftMint(chain, contractAddress, { budgetMs: 8000 });
-      await ctx.reply(buildMintDetectMessage({ chain, contractAddress, detect }), { parse_mode: "Markdown", ...backKeyboard() });
+      await ctx.reply(buildMintDetectMessage({ chain, contractAddress, detect }), { parse_mode: "Markdown" });
+
+      // Only offer the configurator when there is something to configure.
+      // Putting a quantity stepper under a sold-out drop invites tapping it.
+      if (detect.mintVia) {
+        const config = mintSession.startSession(ctx.chat.id, { chain, contractAddress, detect });
+        await ctx.reply(buildMintConfigText(config), { parse_mode: "Markdown", ...mintConfigKeyboard(config) });
+      }
     } catch (err) {
       ctx.reply(`Mint scan failed: ${err.message}`);
     }

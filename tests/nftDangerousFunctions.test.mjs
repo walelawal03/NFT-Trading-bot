@@ -104,7 +104,7 @@ cases.push(["clean collection, IPFS metadata, no setter", async () => {
   assert.equal(v.deduction, 0, `expected 0 deduction, got ${v.deduction}`);
 }]);
 
-cases.push(["pause() present is fatal", async () => {
+cases.push(["pause() with no unpause() is fatal — a one-way door", async () => {
   A = nextAddr();
   PROVIDER = new StubProvider({
     code: { [A.toLowerCase()]: fakeRuntime([...ERC721_BASE, "pause()"]) },
@@ -112,6 +112,57 @@ cases.push(["pause() present is fatal", async () => {
   });
   const scan = await detectNftDangerousFunctions(CHAIN, A);
   assert.deepEqual(scan.transferLock, ["pause()"]);
+  assert.equal(scan.pauseReversible, false);
+  assert.equal(assessNftContractRisk(scan).fatal, true);
+}]);
+
+// The TOKIEMON case (0x802187c3..., Base, 86,538 minted): OpenZeppelin
+// ERC721Pausable on non-upgradeable logic. Was fatal, which rejected a
+// shipped collection on a framework default.
+cases.push(["reversible pause on fixed logic deducts but does not kill", async () => {
+  A = nextAddr();
+  PROVIDER = new StubProvider({
+    code: { [A.toLowerCase()]: fakeRuntime([...ERC721_BASE, "pause()", "unpause()"]) },
+    calls: { [`${A.toLowerCase()}:${sel("tokenURI(uint256)")}`]: encStr("ipfs://bafy/1.json") },
+  });
+  const scan = await detectNftDangerousFunctions(CHAIN, A);
+  assert.equal(scan.pauseReversible, true);
+  const v = assessNftContractRisk(scan);
+  assert.equal(v.fatal, false, "OZ Pausable boilerplate must not hard-reject");
+  assert.equal(v.deduction, 12, "but it must cost heavily");
+}]);
+
+// Reversible today proves nothing if the logic can be swapped tomorrow:
+// an upgrade can drop unpause() entirely.
+cases.push(["reversible pause behind upgradeable logic is fatal", async () => {
+  A = nextAddr();
+  PROVIDER = new StubProvider({
+    code: {
+      [A.toLowerCase()]: "0x363d3d373d3d3d363d5af43d82803e903d91602b57fd5bf3",
+      [IMPL.toLowerCase()]: fakeRuntime([...ERC721_BASE, "pause()", "unpause()"]),
+    },
+    storage: {
+      [`${A.toLowerCase()}:0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc`]: slotWord(IMPL),
+    },
+    calls: { [`${A.toLowerCase()}:${sel("tokenURI(uint256)")}`]: encStr("ipfs://bafy/1.json") },
+  });
+  const scan = await detectNftDangerousFunctions(CHAIN, A);
+  assert.equal(scan.pauseReversible, true, "unpause() is present…");
+  assert.equal(scan.proxy.upgradeable, true, "…but the logic can change");
+  assert.equal(assessNftContractRisk(scan).fatal, true);
+}]);
+
+// A denylist targets one holder while the collection still looks liquid.
+// No reversibility argument applies — this stays fatal unconditionally.
+cases.push(["targeted denial is fatal even alongside a reversible pause", async () => {
+  A = nextAddr();
+  PROVIDER = new StubProvider({
+    code: { [A.toLowerCase()]: fakeRuntime([...ERC721_BASE, "pause()", "unpause()", "blacklist(address)"]) },
+    calls: { [`${A.toLowerCase()}:${sel("tokenURI(uint256)")}`]: encStr("ipfs://bafy/1.json") },
+  });
+  const scan = await detectNftDangerousFunctions(CHAIN, A);
+  assert.deepEqual(scan.transferDeny, ["blacklist(address)"]);
+  assert.equal(scan.pauseReversible, true);
   assert.equal(assessNftContractRisk(scan).fatal, true);
 }]);
 

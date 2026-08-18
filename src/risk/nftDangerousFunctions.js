@@ -61,17 +61,44 @@ const TIER1_SEIZURE_SELECTORS = {
   "0x7d32e793": "recall(uint256)",
 };
 
-// ── Tier 1b: transfer lock ──────────────────────────────────────────────
-// The NFT honeypot. Not a sell tax (there's no pool to tax) but an outright
-// block on moving the token, which means no listing and no exit. Fatal,
-// with one deliberate exception noted below.
+// ── Tier 1b: targeted transfer denial ───────────────────────────────────
+// Blocks named holders while everyone else keeps trading. There is no
+// ordinary reason a drop needs to stop one specific address from
+// transferring, and it is the exact shape of a seller being singled out at
+// exit while the collection still looks liquid from outside. Fatal
+// unconditionally.
 //
-// setOperatorFilteringEnabled is NOT fatal and is scored as tier 2: it's
-// OpenSea's own royalty-enforcement registry, shipped by legitimate
-// collections, and it restricts which marketplaces can transfer rather than
-// blocking transfer outright. Treating it as fatal would reject a large
-// share of genuine drops.
-const TIER1_TRANSFER_LOCK_SELECTORS = {
+// isBlacklisted(address) is a view, kept here because a getter for a
+// denylist is only ever compiled in when the denylist exists.
+const TIER1_TRANSFER_DENY_SELECTORS = {
+  "0xf9f92be4": "blacklist(address)",
+  "0x153b0d1e": "setBlacklist(address,bool)",
+  "0x44337ea1": "addToBlacklist(address)",
+  "0x9cfe42da": "addBlacklist(address)",
+  "0x000af2a1": "setBlocked(address,bool)",
+  "0x57652a46": "setDenied(address,bool)",
+  "0xfe575a87": "isBlacklisted(address)",
+};
+
+// ── Tier 1c: global transfer switch ─────────────────────────────────────
+// Halts transfers for the whole collection at once, the team included.
+// Conditionally fatal — see assessNftContractRisk.
+//
+// These were fatal unconditionally until a live sample said otherwise.
+// TOKIEMON (0x802187c3..., Base, 86,538 minted) is a shipped game whose
+// only tier-1 finding is OpenZeppelin's ERC721Pausable boilerplate; it
+// scanned FATAL, and so did every other pause() holder. All three fatal
+// verdicts in a 28-contract Base sample came from this table and nothing
+// else, which is a gate firing on a framework default rather than on
+// intent.
+//
+// This is the same call already made below for setOperatorFilteringEnabled,
+// on the same grounds: a capability shipped by a large share of genuine
+// collections cannot carry a hard reject on its own. The exit risk is real,
+// so it still costs heavily — but the instrument that actually answers
+// "can I exit" is the round-trip probe, which mints and transfers for real.
+// A static gate should not pretend to settle it.
+const TIER1_TRANSFER_PAUSE_SELECTORS = {
   "0x8456cb59": "pause()",
   "0x16c38b3c": "setPaused(bool)",
   "0x36566f06": "togglePaused()",
@@ -82,14 +109,14 @@ const TIER1_TRANSFER_LOCK_SELECTORS = {
   "0x35e60bd4": "setTransferLocked(bool)",
   "0xdf30e54b": "setSoulbound(bool)",
   "0x211e28b6": "setLocked(bool)",
-  "0xf9f92be4": "blacklist(address)",
-  "0x153b0d1e": "setBlacklist(address,bool)",
-  "0x44337ea1": "addToBlacklist(address)",
-  "0x9cfe42da": "addBlacklist(address)",
-  "0x000af2a1": "setBlocked(address,bool)",
-  "0x57652a46": "setDenied(address,bool)",
-  "0xfe575a87": "isBlacklisted(address)",
 };
+
+// Every switch above is a bool setter or toggle that can be set back —
+// except pause(), which needs a matching unpause() to be reversible. A
+// pause with no way out is a one-way door to a permanently frozen
+// collection, so its absence is what separates boilerplate from a trap.
+const SELECTOR_PAUSE = "0x8456cb59";
+const SELECTOR_UNPAUSE = "0x3f4ba83a";
 
 // ── Metadata control ────────────────────────────────────────────────────
 // Presence alone is normal — a delayed reveal needs a URI setter. What
@@ -448,7 +475,10 @@ function withBudget(promise, ms, stage) {
  *     reason: string|null,       // why checked is false
  *     proxy: { via, implementation, upgradeable },
  *     seizure: string[],         // tier 1 — fatal
- *     transferLock: string[],    // tier 1 — fatal
+ *     transferDeny: string[],    // tier 1b — fatal
+ *     transferPause: string[],   // tier 1c — fatal only if irreversible
+ *     transferLock: string[],    // union of the two, for display
+ *     pauseReversible: boolean,  // false = pause() with no unpause()
  *     metadataControl: string[],
  *     metadataFreeze: string[],  // positive signal
  *     supplyControl: string[],   // tier 2
@@ -493,7 +523,10 @@ export async function detectNftDangerousFunctions(chain, contractAddress, { budg
             reason: "No contract code at this address",
             proxy,
             seizure: [],
+            transferDeny: [],
+            transferPause: [],
             transferLock: [],
+            pauseReversible: true,
             metadataControl: [],
             metadataFreeze: [],
             supplyControl: [],
@@ -520,7 +553,19 @@ export async function detectNftDangerousFunctions(chain, contractAddress, { budg
           reason: null,
           proxy: { via: proxy.via, implementation: proxy.implementation, upgradeable: proxy.upgradeable },
           seizure: matched(selectors, TIER1_SEIZURE_SELECTORS),
-          transferLock: matched(selectors, TIER1_TRANSFER_LOCK_SELECTORS),
+          transferDeny: matched(selectors, TIER1_TRANSFER_DENY_SELECTORS),
+          transferPause: matched(selectors, TIER1_TRANSFER_PAUSE_SELECTORS),
+          // Union of the two, kept so every existing consumer (the Telegram
+          // formatter, the CLI) still renders one "transfer lock" list.
+          transferLock: [
+            ...matched(selectors, TIER1_TRANSFER_DENY_SELECTORS),
+            ...matched(selectors, TIER1_TRANSFER_PAUSE_SELECTORS),
+          ],
+          // Only meaningful when pause() is present; true for every other
+          // switch in the table, which are all settable back by construction.
+          pauseReversible: selectors.includes(SELECTOR_PAUSE)
+            ? selectors.includes(SELECTOR_UNPAUSE)
+            : true,
           metadataControl,
           metadataFreeze,
           supplyControl: matched(selectors, SUPPLY_CONTROL_SELECTORS),
@@ -562,7 +607,10 @@ export async function detectNftDangerousFunctions(chain, contractAddress, { budg
       elapsedMs: Date.now() - startedAt,
       proxy: { via: "unknown", implementation: null, upgradeable: false },
       seizure: [],
+      transferDeny: [],
+      transferPause: [],
       transferLock: [],
+      pauseReversible: true,
       metadataControl: [],
       metadataFreeze: [],
       supplyControl: [],
@@ -608,9 +656,34 @@ export function assessNftContractRisk(scan) {
     fatal = true;
     flags.push(`🚨 Seizure capability: ${scan.seizure.join(", ")} — owner can take the NFT back`);
   }
-  if (scan.transferLock.length > 0) {
+  if (scan.transferDeny.length > 0) {
     fatal = true;
-    flags.push(`🚨 Transfer can be blocked: ${scan.transferLock.join(", ")} — mintable but potentially unsellable`);
+    flags.push(`🚨 Named holders can be blocked: ${scan.transferDeny.join(", ")} — a seller can be singled out at exit`);
+  }
+
+  // A global pause is boilerplate on its own (see TIER1_TRANSFER_PAUSE_
+  // SELECTORS), so it is fatal only when it stops being reversible in
+  // practice. Two ways that happens:
+  //
+  //   · pause() with no unpause() — a one-way door, nobody exits after.
+  //   · pause() behind upgradeable logic — unpause() can be removed in an
+  //     upgrade, so today's reversibility proves nothing about tomorrow's.
+  //
+  // Otherwise it costs 12 of the 35, which is heavy but survivable: enough
+  // that a pausable contract needs real merit elsewhere to clear a filter,
+  // not so much that it is a reject wearing a score.
+  if (scan.transferPause.length > 0) {
+    const irreversible = !scan.pauseReversible;
+    if (irreversible || scan.proxy.upgradeable) {
+      fatal = true;
+      flags.push(
+        `🚨 Transfers can be halted with no reliable way back: ${scan.transferPause.join(", ")}` +
+          (irreversible ? " — pause() with no unpause()" : " — pausable and upgradeable")
+      );
+    } else {
+      deduction += 12;
+      flags.push(`Transfers can be halted collection-wide: ${scan.transferPause.join(", ")} (reversible)`);
+    }
   }
 
   if (scan.metadata.level === "high") {

@@ -11,7 +11,8 @@ const addr = "0x1234567890123456789012345678901234567890";
 const base = {
   checked: true, timedOut: false,
   proxy: { via: "direct", implementation: null, upgradeable: false },
-  seizure: [], transferLock: [], metadataControl: [], metadataFreeze: [],
+  seizure: [], transferDeny: [], transferPause: [], transferLock: [],
+  pauseReversible: true, metadataControl: [], metadataFreeze: [],
   supplyControl: [], economicControl: [], upgradeEntrypoints: [], selectorCount: 54,
   metadata: { level: "low", scheme: "ipfs", uri: "ipfs://bafy/1.json", reason: "No URI setter found in bytecode" },
 };
@@ -36,7 +37,8 @@ console.log("\nformatNftScan\n");
 t("markdown markers balance across every message shape", () => {
   const shapes = [
     base,
-    { ...base, seizure: ["seize(uint256)"], transferLock: ["pause()"],
+    { ...base, seizure: ["seize(uint256)"],
+      transferPause: ["pause()"], transferLock: ["pause()"], pauseReversible: false,
       metadata: { level: "high", scheme: "http", uri: "https://x.io/1", reason: "Mutable URI setter AND metadata served from a centralised host" } },
     { ...base, checked: false, timedOut: true, reason: "Scan exceeded 8000ms budget at round trip 1", selectorCount: 0 },
     { ...base, checked: false, timedOut: false, reason: "server response 403 Forbidden", selectorCount: 0 },
@@ -67,7 +69,9 @@ t("an unknown scan never reads like a pass", () => {
 });
 
 t("a fatal scan leads with the instruction, not the detail", () => {
-  const m = render({ ...base, transferLock: ["pause()"] });
+  // Irreversible pause: fatal under the tier-1c rule, so this stays a
+  // fatal-shaped message without leaning on a seizure finding.
+  const m = render({ ...base, transferPause: ["pause()"], transferLock: ["pause()"], pauseReversible: false });
   assert.ok(m.startsWith("🚨"), "fatal must lead with the alarm");
   assert.ok(m.indexOf("Do not mint") < m.indexOf("Capabilities found"), "verdict must precede detail");
 });
@@ -76,7 +80,8 @@ t("stays under Telegram's 4096 limit with a pathological contract", () => {
   const many = (n, p) => Array.from({ length: n }, (_, i) => `${p}${i}(uint256,address,bytes32)`);
   const m = render({
     ...base, selectorCount: 400,
-    seizure: many(30, "seize"), transferLock: many(30, "lock"), metadataControl: many(30, "meta"),
+    seizure: many(30, "seize"), transferDeny: many(30, "deny"), transferPause: many(30, "lock"),
+    transferLock: [...many(30, "deny"), ...many(30, "lock")], metadataControl: many(30, "meta"),
     supplyControl: many(30, "supply"), economicControl: many(30, "econ"), upgradeEntrypoints: many(30, "upg"),
   });
   assert.ok(m.length < 4096, `message is ${m.length} chars`);

@@ -11,6 +11,8 @@ const tg = new Telegraf(process.env.TELEGRAM_BOT_TOKEN).telegram;
 // so — a menu offering token commands invites using them.
 const commands = [
   { command: "start", description: "Show the main menu" },
+  { command: "mint", description: "Read a drop's mint config: price, phase, max per wallet, and how it mints" },
+  { command: "mintwallets", description: "Import and manage the wallets a mint is spread across" },
   { command: "nftcheck", description: "Scan a contract — no OpenSea, no GoPlus. Works on brand-new contracts" },
   { command: "nftscore", description: "Full risk score for a collection (needs OpenSea to have indexed it)" },
   { command: "nftfilter", description: "Show the current NFT filter thresholds" },

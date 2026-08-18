@@ -1,8 +1,6 @@
 // Deployer reputation must come from what happened, not from what we said.
-// Covers both pipelines: NFT collections (floor outcomes) and tokens (closed
-// paper trades). They stay separate functions per this codebase's
-// parallel-modules convention; the tests share a file because the property
-// being checked is identical.
+// NFT collections only — the token pipeline is a separate bot and out of
+// scope for this repo.
 //
 // Runs against a throwaway SQLite file (RAILWAY_VOLUME_MOUNT_PATH points at
 // a temp dir), so it never touches data/bot.sqlite. No network, no env
@@ -144,94 +142,6 @@ t("settling one horizon leaves the others pending", () => {
 t("an unknown horizon is rejected rather than silently querying the wrong column", () => {
   assert.throws(() => db.getNftCallsPendingOutcome(Date.now(), "90d"), /Unknown NFT outcome horizon/);
   assert.throws(() => db.recordNftCallOutcome(1, { outcomeFloorEth: 1, outcomePct: 1 }, "1h"), /Unknown NFT outcome horizon/);
-});
-
-// ── Token side ──────────────────────────────────────────────────────────
-// Same loop, same fix, different ground truth: closed paper trades rather
-// than floor snapshots.
-
-function tokenCallFor(deployer, { closed = null } = {}) {
-  const address = `0xt0ken${String(++seq).padStart(35, "0")}`;
-  db.recordCall({
-    chain: "base", tokenAddress: address, pairAddress: `0xpair${seq}`, symbol: `S${seq}`,
-    name: `t${seq}`, callPriceUsd: 1, callMarketCapUsd: 1000, riskScore: 50, riskGrade: "C",
-    telegramMessageId: null, calledAt: Date.now(), deployerAddress: deployer,
-    callLiquidityUsd: null, callVolume24hUsd: null, callHolderCount: null, callTop10Pct: null,
-    callCreatorPct: null, callIsOpenSource: null, callIsMintable: null,
-  });
-  if (closed) {
-    db.openPaperTrade({
-      chain: "base", tokenAddress: address, symbol: `S${seq}`, name: `t${seq}`,
-      entryPriceUsd: 1, positionSizeUsd: 500, takeProfitPct: 100, stopLossPct: -50,
-      entryAt: Date.now(), entryMarketCapUsd: 1000,
-    });
-    const open = db.getOpenPaperTrades().find((t) => t.token_address === address);
-    assert.ok(open, "paper trade should have opened");
-    db.closePaperTrade(open.id, {
-      exitPriceUsd: closed.exitPriceUsd ?? 0,
-      exitReason: closed.exitReason,
-      pnlUsd: -500,
-      pnlPct: closed.pnlPct,
-    });
-  }
-  return address;
-}
-
-t("token: a deployer with no closed trades is unknown, not clean", () => {
-  const r = db.getTokenDeployerRealizedRecord(nextDeployer());
-  assert.equal(r.tokens, 0);
-  assert.equal(r.ruggedRatio, null);
-});
-
-t("token: an open trade is not evidence in either direction", () => {
-  const d = nextDeployer();
-  tokenCallFor(d, { closed: null });
-  assert.equal(db.getTokenDeployerRealizedRecord(d).tokens, 0);
-});
-
-t("token: stale_price counts as a rug", () => {
-  const d = nextDeployer();
-  tokenCallFor(d, { closed: { exitReason: "stale_price", pnlPct: -100, exitPriceUsd: 0 } });
-  const r = db.getTokenDeployerRealizedRecord(d);
-  assert.equal(r.tokens, 1);
-  assert.equal(r.rugged, 1, "a drained pool is the clearest realized rug there is");
-});
-
-// The reason the label keys on exit_reason and not on the number alone: the
-// stop-loss floors ordinary losers near -50, so a threshold set carelessly
-// would relabel every stopped-out trade as a rug.
-t("token: an ordinary stop_loss is not a rug", () => {
-  const d = nextDeployer();
-  tokenCallFor(d, { closed: { exitReason: "stop_loss", pnlPct: -50, exitPriceUsd: 0.5 } });
-  const r = db.getTokenDeployerRealizedRecord(d);
-  assert.equal(r.tokens, 1);
-  assert.equal(r.rugged, 0, "-50% at the configured stop is a bad trade, not a rug");
-});
-
-t("token: take_profit is not a rug and the ratio reflects it", () => {
-  const d = nextDeployer();
-  tokenCallFor(d, { closed: { exitReason: "take_profit", pnlPct: 100, exitPriceUsd: 2 } });
-  tokenCallFor(d, { closed: { exitReason: "stale_price", pnlPct: -100, exitPriceUsd: 0 } });
-  const r = db.getTokenDeployerRealizedRecord(d);
-  assert.equal(r.tokens, 2);
-  assert.equal(r.rugged, 1);
-  assert.equal(r.ruggedRatio, 0.5);
-  assert.equal(r.worstPct, -100);
-});
-
-t("token: a readable-price collapse past the threshold still counts", () => {
-  const d = nextDeployer();
-  tokenCallFor(d, { closed: { exitReason: "comando_ai_exit", pnlPct: -85, exitPriceUsd: 0.15 } });
-  assert.equal(db.getTokenDeployerRealizedRecord(d).rugged, 1, "-85% is a rug whatever exited it");
-});
-
-t("token: one deployer's trades never leak into another's record", () => {
-  const a = nextDeployer(), b = nextDeployer();
-  tokenCallFor(a, { closed: { exitReason: "stale_price", pnlPct: -100, exitPriceUsd: 0 } });
-  tokenCallFor(b, { closed: { exitReason: "take_profit", pnlPct: 90, exitPriceUsd: 1.9 } });
-  assert.equal(db.getTokenDeployerRealizedRecord(a).rugged, 1);
-  assert.equal(db.getTokenDeployerRealizedRecord(b).rugged, 0);
-  assert.equal(db.getTokenDeployerRealizedRecord(b).tokens, 1);
 });
 
 // Best-effort teardown. node:sqlite keeps the file handle open for the life

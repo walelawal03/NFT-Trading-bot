@@ -335,11 +335,6 @@ addColumnIfMissing("called_nft_collections", "deployer_address", "TEXT");
 // skips its normal expire-after-window deactivation for them (user-requested
 // "retain" control, the counterpart of the manual remove below).
 addColumnIfMissing("called_tokens", "pinned", "INTEGER NOT NULL DEFAULT 0");
-// Token-side counterpart of called_nft_collections.deployer_address, for the
-// same reason: it is what lets a deployer's record be joined to what
-// actually happened to their tokens instead of to our own past scores. See
-// getTokenDeployerRealizedRecord.
-addColumnIfMissing("called_tokens", "deployer_address", "TEXT");
 
 export function hasSeenPair(chain, pairAddress) {
   return !!db
@@ -391,68 +386,14 @@ export function recordCall(entry) {
       (chain, token_address, pair_address, symbol, name, call_price_usd, call_market_cap_usd,
        risk_score, risk_grade, telegram_message_id, called_at, last_updated_at, active,
        call_liquidity_usd, call_volume24h_usd, call_holder_count, call_top10_pct,
-       call_creator_pct, call_is_open_source, call_is_mintable, deployer_address)
+       call_creator_pct, call_is_open_source, call_is_mintable)
     VALUES (@chain, @tokenAddress, @pairAddress, @symbol, @name, @callPriceUsd, @callMarketCapUsd,
        @riskScore, @riskGrade, @telegramMessageId, @calledAt, @calledAt, 1,
        @callLiquidityUsd, @callVolume24hUsd, @callHolderCount, @callTop10Pct,
-       @callCreatorPct, @callIsOpenSource, @callIsMintable, @deployerAddress)
+       @callCreatorPct, @callIsOpenSource, @callIsMintable)
     ON CONFLICT(chain, token_address) DO NOTHING
   `);
   return stmt.run(entry);
-}
-
-// What actually happened to this deployer's previous tokens.
-//
-// The token-side twin of getNftDeployerRealizedRecord, and it replaces the
-// same feedback loop: pipeline.js incremented deployer_history.low_score_count
-// from `riskResult.score < 40` — our own verdict — and riskScore.js read it
-// straight back to adjust the next score. Reputation was our previous
-// opinion, immune to correction by anything that happened on-chain.
-//
-// Ground truth is called_tokens joined to CLOSED paper trades, the join
-// scripts/extractRugTrainingData.mjs already uses. Paper trades close on a
-// real price, so this is a realized result rather than a mark.
-//
-// The rug label leans on exit_reason, not on the percentage alone, because
-// a stop-loss truncates the loss distribution and makes the percentage
-// misleading. Closed trades land in three clusters: take_profit near the
-// configured target, stop_loss near stopLossPct (-50 by default), and
-// stale_price at exactly -100 — the latter set in paperTrading.js when a
-// pool goes unreadable for long enough to call it drained, which is the
-// closest thing to an observed rug this bot records.
-//
-// So ruggedBelowPct exists to catch collapses that still had a readable
-// price, and it MUST stay below the configured stopLossPct. At -60 against
-// the default -50 there is clear air between them. Raise stopLossPct past
-// this number and every ordinary stop-loss silently becomes a "rug", which
-// would poison the record it is supposed to protect.
-//
-// A deployer with no closed trades returns { tokens: 0, ruggedRatio: null }
-// — unknown, never clean.
-export function getTokenDeployerRealizedRecord(deployerAddress, { ruggedBelowPct = -60 } = {}) {
-  const rugged = `(p.exit_reason = 'stale_price' OR p.pnl_pct <= ?)`;
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) n,
-              AVG(p.pnl_pct) avgPct,
-              MIN(p.pnl_pct) worstPct,
-              SUM(CASE WHEN ${rugged} THEN 1 ELSE 0 END) rugged
-       FROM called_tokens c
-       JOIN paper_trades p ON p.chain = c.chain AND p.token_address = c.token_address
-       WHERE LOWER(c.deployer_address) = LOWER(?)
-         AND p.status = 'closed' AND p.pnl_pct IS NOT NULL`
-    )
-    .get(ruggedBelowPct, deployerAddress);
-  if (!row || row.n === 0) {
-    return { tokens: 0, rugged: 0, ruggedRatio: null, avgPct: null, worstPct: null };
-  }
-  return {
-    tokens: row.n,
-    rugged: row.rugged,
-    ruggedRatio: row.rugged / row.n,
-    avgPct: row.avgPct,
-    worstPct: row.worstPct,
-  };
 }
 
 // Deliberately does NOT filter by called_at here — the caller (priceUpdater.js)
@@ -534,17 +475,20 @@ export function updateCallMilestone(id, { bestMilestoneHit, lastUpdateSentAt, la
   ).run(bestMilestoneHit, lastUpdateSentAt, lastUpdatePct, lastUpdateSentAt, id);
 }
 
-// recordDeployerOutcome() and getDeployerHistory() used to live here. They
-// were the two halves of a feedback loop — the writer stored
-// `riskResult.score < 40`, the reader fed it back into the next score — so
-// removing one without the other would have left a dangling half. Both
-// pipelines now store deployer_address on the call row instead, and read
-// getTokenDeployerRealizedRecord / getNftDeployerRealizedRecord.
-//
-// The deployer_history TABLE is deliberately left in place rather than
-// dropped. It is no longer read or written, so it costs nothing, and a
-// destructive migration against a live volume to delete data we have
-// already decided not to trust would be all risk and no benefit.
+export function recordDeployerOutcome(deployerAddress, { lowScore }) {
+  db.prepare(
+    `INSERT INTO deployer_history (deployer_address, tokens_deployed, low_score_count, last_seen_at)
+     VALUES (?, 1, ?, ?)
+     ON CONFLICT(deployer_address) DO UPDATE SET
+       tokens_deployed = tokens_deployed + 1,
+       low_score_count = low_score_count + ?,
+       last_seen_at = ?`
+  ).run(deployerAddress, lowScore ? 1 : 0, Date.now(), lowScore ? 1 : 0, Date.now());
+}
+
+export function getDeployerHistory(deployerAddress) {
+  return db.prepare("SELECT * FROM deployer_history WHERE deployer_address = ?").get(deployerAddress);
+}
 
 // Dedup for the "caught and skipped a honeypot" notification — the recheck
 // queue re-runs the sellability probe every 2m for up to maxTokenAgeMinutes,

@@ -1038,8 +1038,13 @@ async function scoreAndReplyNft(ctx, contractAddress, chainKeyHint) {
 // OpenSea dependency, so requiring the key would block the one check that
 // still works without it.
 async function scanAndReplyNftContract(ctx, contractAddress, chainKeyHint) {
+  // Validate against the ENABLED NFT chains, not CHAINS. CHAINS also holds
+  // the token-only chains, so checking it accepted `/nftcheck ethereum ...`
+  // and then failed several layers down with "No RPC configured for
+  // ethereum (ETHEREUM_HTTP_RPC)" — an internal plumbing message for what is
+  // really "this bot doesn't watch that chain".
   const chainKey = chainKeyHint || getNftChainKeys()[0];
-  if (!CHAINS[chainKey]) {
+  if (!getNftChainKeys().includes(chainKey) || !CHAINS[chainKey]) {
     throw new Error(`Unknown chain. Options: ${getNftChainKeys().join(", ")}`);
   }
   const chain = { key: chainKey, ...CHAINS[chainKey] };
@@ -2662,17 +2667,26 @@ export function createBot(stats, chainControls, digestControls) {
   // --- NFT menu — all gated behind OPENSEA_API_KEY being configured (the
   // main-menu button itself is already hidden without it, but every entry
   // point re-checks since callback data could in principle be replayed).
+  // answerCbQuery is only valid for a callback_query update. The optional
+  // call reads as if it guards that, but Context always defines the method
+  // and throws when the update is a message — so every /nftscore issued
+  // without an OPENSEA_API_KEY threw out of the command handler instead of
+  // replying with the reason. Branch on the update kind, not on the method
+  // existing.
   function requireOpensea(ctx) {
-    if (!config.openseaApiKey) {
-      ctx.answerCbQuery?.("NFT features need OPENSEA_API_KEY set in .env.");
-      return false;
-    }
-    return true;
+    if (config.openseaApiKey) return true;
+    if (ctx.callbackQuery) ctx.answerCbQuery("NFT features need OPENSEA_API_KEY set in .env.");
+    return false;
   }
 
+  // Deliberately NOT gated on OPENSEA_API_KEY. The contract scan and the
+  // filter settings underneath this menu are pure RPC and local config —
+  // gating the whole menu made the one capability that still works without
+  // an aggregator unreachable from the UI, while /nftcheck worked fine by
+  // typing it. The individual OpenSea-dependent actions keep their own
+  // guard.
   bot.action("menu:nft", async (ctx) => {
     await ctx.answerCbQuery();
-    if (!requireOpensea(ctx)) return;
     const chainLabels = getNftChainDefs().map((c) => c.label).join(", ") || "none configured";
     await safeEdit(
       ctx,
@@ -2694,9 +2708,11 @@ export function createBot(stats, chainControls, digestControls) {
     );
   });
 
+  // Filter settings are a local JSON file; nothing here calls OpenSea, and
+  // the contract gates in particular must stay configurable on a deployment
+  // that has no OpenSea key at all.
   bot.action("menu:nftfilter", async (ctx) => {
     await ctx.answerCbQuery();
-    if (!requireOpensea(ctx)) return;
     const filters = loadNftFilters();
     await safeEdit(ctx, renderNftFiltersText(filters), nftFilterKeyboard(filters));
   });

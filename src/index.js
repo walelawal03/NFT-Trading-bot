@@ -129,14 +129,21 @@ const chainControls = {
 const digestControls = { sendNow: async () => {}, reschedule: () => {} };
 
 const bot = createBot(stats, chainControls, digestControls);
-for (const chainDef of getActiveChainDefs()) startChainWatcher(chainDef.key);
-startMilestoneChecker(bot);
-Object.assign(digestControls, startWatchlistDigest(bot));
-startRecheckQueue(bot);
-startTrackUpdater(bot);
-startPaperTradeChecker(bot);
-startRealTradeChecker(bot);
-startStalePriceRugCheck(bot);
+
+// This is the NFT mint underwriter. It is a SEPARATE BOT from the token
+// trading bot, and nothing token-related starts here.
+//
+// The repo was seeded from the token bot's tree, so those modules are still
+// present on disk and still imported above — but the token pair watchers,
+// recheck queue, milestone/track updaters, paper- and real-trade checkers
+// and stale-price rug check are all deliberately NOT started. Left running,
+// this process would evaluate token launches and post token calls into the
+// NFT bot's Telegram chat, which is not what this bot is for.
+//
+// The token modules stay imported rather than deleted because bot.js still
+// renders the shared menus that reference them; pruning that is a separate
+// job from making sure none of it RUNS. If a token watcher ever needs to
+// come back, it belongs in the other bot, not here.
 
 // NFT support lives entirely behind OPENSEA_API_KEY being configured —
 // with no key, none of this starts and the rest of the bot behaves exactly

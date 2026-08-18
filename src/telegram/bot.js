@@ -73,6 +73,8 @@ import { renderPnlCalendar } from "./pnlCalendar.js";
 import { computeNftRiskScore } from "../risk/nftRisk.js";
 import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftDangerousFunctions.js";
 import { buildNftScanMessage } from "./formatNftScan.js";
+import { detectNftMint } from "../mint/nftMintDetect.js";
+import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
 import { loadNftFilters, saveNftFilters } from "../filters/nftFilter.js";
@@ -3026,6 +3028,43 @@ export function createBot(stats, chainControls, digestControls) {
       await scoreAndReplyNft(ctx, contractAddress, chainKeyHint);
     } catch (err) {
       ctx.reply(`Failed to score collection: ${err.message}`);
+    }
+  });
+
+  // Reads how a collection is minted: standard, price, phase window, max per
+  // wallet, and which contract the mint transaction actually goes to. Same
+  // no-aggregator discipline as /nftcheck — a mint worth catching is minutes
+  // old and OpenSea has never heard of it.
+  //
+  // Read-only. This sends nothing and needs no key.
+  bot.command("mint", async (ctx) => {
+    const args = ctx.message.text.split(/\s+/).filter(Boolean).slice(1);
+    const usage =
+      `Usage: /mint <contractAddress> or /mint <chain> <contractAddress>
+` +
+      `Chains: ${getNftChainKeys().join(", ")} (defaults to ${getNftChainKeys()[0]})
+
+` +
+      `Reads mint price, phase timing and max-per-wallet straight from the contract.`;
+
+    let chainKeyHint, contractAddress;
+    if (args.length === 1) contractAddress = args[0];
+    else if (args.length === 2) { [chainKeyHint, contractAddress] = args; chainKeyHint = chainKeyHint.toLowerCase(); }
+    else return ctx.reply(usage);
+    if (!contractAddress || !ADDRESS_RE.test(contractAddress)) return ctx.reply(usage);
+
+    const chainKey = chainKeyHint || getNftChainKeys()[0];
+    if (!getNftChainKeys().includes(chainKey) || !CHAINS[chainKey]) {
+      return ctx.reply(`Unknown chain. Options: ${getNftChainKeys().join(", ")}`);
+    }
+
+    await ctx.reply("Reading mint config…");
+    try {
+      const chain = { key: chainKey, ...CHAINS[chainKey] };
+      const detect = await detectNftMint(chain, contractAddress, { budgetMs: 8000 });
+      await ctx.reply(buildMintDetectMessage({ chain, contractAddress, detect }), { parse_mode: "Markdown", ...backKeyboard() });
+    } catch (err) {
+      ctx.reply(`Mint scan failed: ${err.message}`);
     }
   });
 

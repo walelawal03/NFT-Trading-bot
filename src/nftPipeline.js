@@ -1,7 +1,7 @@
 import { computeNftRiskScore } from "./risk/nftRisk.js";
 import { applyNftFilter } from "./filters/nftFilter.js";
 import { getContract, getCollection } from "./risk/opensea.js";
-import { recordNftCall, recordDeployerOutcome, hasBeenCalledNft, addNftPendingListing } from "./store/db.js";
+import { recordNftCall, hasBeenCalledNft, addNftPendingListing } from "./store/db.js";
 import { postNftCall } from "./telegram/bot.js";
 import { openNftPaperTradeIfRoom } from "./nftPaperTrading.js";
 import { openNftRealTradeIfRoom } from "./nftRealTrading.js";
@@ -25,9 +25,17 @@ export async function evaluateNftCollection(bot, { chain, contractAddress, sourc
     triggerWalletAddress: triggerWallet?.address,
   });
 
-  if (riskResult.deployerAddress) {
-    recordDeployerOutcome(riskResult.deployerAddress, { lowScore: riskResult.score < 40 });
-  }
+  // The deployer's record is NOT written here any more. This used to call
+  // recordDeployerOutcome(addr, { lowScore: riskResult.score < 40 }) — on
+  // every evaluation, passing or not — and nftRisk.js read that number back
+  // to adjust the next score. The deployer's reputation was our own verdict
+  // reflected back at us, unfalsifiable by anything that actually happened.
+  //
+  // What replaces it: the deployer address is stored on the call below, and
+  // nftOutcomeTracker resolves what the floor did afterwards. nftRisk.js
+  // reads that realized record instead. Reputation now comes from outcomes,
+  // which means it stays empty until outcomes exist — correct, and honest
+  // about it.
 
   if (!pass) {
     return { pass: false, reasons, riskResult };
@@ -53,6 +61,7 @@ export async function evaluateNftCollection(bot, { chain, contractAddress, sourc
     triggerWalletAddress: triggerWallet?.address || null,
     telegramMessageId: messageId,
     calledAt: Date.now(),
+    deployerAddress: riskResult.deployerAddress || null,
   });
 
   // Paper trading always runs alongside real trading, same as the token

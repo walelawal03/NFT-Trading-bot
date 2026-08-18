@@ -312,6 +312,12 @@ addColumnIfMissing("real_trades", "entry_market_cap_usd", "REAL");
 addColumnIfMissing("called_nft_collections", "outcome_checked_at", "INTEGER");
 addColumnIfMissing("called_nft_collections", "outcome_floor_eth", "REAL");
 addColumnIfMissing("called_nft_collections", "outcome_pct", "REAL");
+// Who deployed the collection, captured at call time so a deployer's record
+// can later be joined to what actually happened to their drops. Without this
+// column the only per-deployer signal available was deployer_history's
+// low_score_count, which is written from our own risk score — see
+// getNftDeployerRealizedRecord below for why that had to stop.
+addColumnIfMissing("called_nft_collections", "deployer_address", "TEXT");
 // Pinned calls stay on the Watchlist indefinitely — the milestone checker
 // skips its normal expire-after-window deactivation for them (user-requested
 // "retain" control, the counterpart of the manual remove below).
@@ -819,10 +825,10 @@ export function recordNftCall(entry) {
     INSERT INTO called_nft_collections
       (chain, contract_address, collection_slug, name, image_url, call_floor_price_eth,
        call_volume24h_eth, call_num_owners, call_total_supply, risk_score, risk_grade,
-       source, trigger_wallet_address, telegram_message_id, called_at)
+       source, trigger_wallet_address, telegram_message_id, called_at, deployer_address)
     VALUES (@chain, @contractAddress, @collectionSlug, @name, @imageUrl, @callFloorPriceEth,
        @callVolume24hEth, @callNumOwners, @callTotalSupply, @riskScore, @riskGrade,
-       @source, @triggerWalletAddress, @telegramMessageId, @calledAt)
+       @source, @triggerWalletAddress, @telegramMessageId, @calledAt, @deployerAddress)
     ON CONFLICT(chain, contract_address) DO NOTHING
   `);
   return stmt.run(entry);
@@ -852,6 +858,51 @@ export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }) {
     outcomePct,
     id
   );
+}
+
+// What actually happened to this deployer's previous collections.
+//
+// This exists to replace a feedback loop, not to add a feature. The old
+// per-deployer signal was deployer_history.low_score_count, incremented by
+// nftPipeline.js with `{ lowScore: riskResult.score < 40 }` — our own
+// scorer's verdict — and read straight back by nftRisk.js to adjust the
+// next score. A deployer's reputation was therefore defined by what we had
+// previously said about them, never by whether anything rugged. That kind
+// of loop converges on something confident and unfalsifiable: it cannot be
+// contradicted by reality because reality is not an input.
+//
+// Realized floor movement is an input reality controls. Only rows with a
+// resolved outcome count, so a deployer with no settled history returns
+// { collections: 0 } and the caller must treat that as unknown — never as
+// clean. Same convention as honeypot: null and checked: false elsewhere.
+//
+// Expect this to be empty for a long time. There are currently zero NFT
+// rows with outcomes, and mint-time calls (source "new_collection") have no
+// call-time floor, so they never become eligible at all — see
+// getNftCallsPendingOutcome. Honest emptiness is the point; the loop it
+// replaces was never empty and never right.
+export function getNftDeployerRealizedRecord(deployerAddress, { ruggedBelowPct = -60 } = {}) {
+  const row = db
+    .prepare(
+      `SELECT COUNT(*) n,
+              AVG(outcome_pct) avgPct,
+              MIN(outcome_pct) worstPct,
+              SUM(CASE WHEN outcome_pct <= ? THEN 1 ELSE 0 END) rugged
+       FROM called_nft_collections
+       WHERE LOWER(deployer_address) = LOWER(?)
+         AND outcome_checked_at IS NOT NULL AND outcome_pct IS NOT NULL`
+    )
+    .get(ruggedBelowPct, deployerAddress);
+  if (!row || row.n === 0) {
+    return { collections: 0, rugged: 0, ruggedRatio: null, avgPct: null, worstPct: null };
+  }
+  return {
+    collections: row.n,
+    rugged: row.rugged,
+    ruggedRatio: row.rugged / row.n,
+    avgPct: row.avgPct,
+    worstPct: row.worstPct,
+  };
 }
 
 // One wallet's aggregate copy-trade track record — only counts calls with

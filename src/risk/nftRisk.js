@@ -1,7 +1,7 @@
 import { getNftSecurity } from "./goplus.js";
 import { getContract, getCollection, getCollectionStats } from "./opensea.js";
 import { getContractCreator, getDeployerTxCount } from "./explorer.js";
-import { getDeployerHistory } from "../store/db.js";
+import { getNftDeployerRealizedRecord } from "../store/db.js";
 
 // Same weighting shape as risk/riskScore.js (token side) — contract safety
 // carries the most weight, deployer history the least directly-observable
@@ -101,18 +101,37 @@ async function scoreDeployerHistory(chain, contractAddress, flags) {
     return { points: WEIGHTS.deployerHistory * NO_DATA_FACTOR, deployerAddress: null };
   }
 
-  const localHistory = getDeployerHistory(creation.deployerAddress);
+  // Realized outcomes only. This used to read deployer_history's
+  // low_score_count, which nftPipeline.js wrote from THIS function's own
+  // output (`lowScore: riskResult.score < 40`) — a closed loop in which the
+  // deployer's reputation was our previous opinion of them rather than
+  // anything that happened on-chain. It could never be contradicted by
+  // evidence, so it would settle into confident nonsense.
+  //
+  // A drawdown at or past -60% is the starting line for "rugged". It is
+  // well outside ordinary post-mint floor noise, and it deliberately does
+  // not try to separate hard rug from abandonment from no-demand — from a
+  // holder's side those are the same event, and only the first is even
+  // visible to static analysis. Treat the number as unvalidated: there are
+  // no NFT outcome rows yet, so nothing has tuned it. Revisit once there
+  // are enough resolved collections to look at the distribution.
+  const record = getNftDeployerRealizedRecord(creation.deployerAddress, { ruggedBelowPct: -60 });
   let points = WEIGHTS.deployerHistory;
 
-  if (localHistory && localHistory.tokens_deployed > 0) {
-    const badRatio = localHistory.low_score_count / localHistory.tokens_deployed;
-    if (badRatio > 0.5) {
-      points = 2;
-      flags.push(`Deployer has ${localHistory.low_score_count}/${localHistory.tokens_deployed} prior low-risk-score contracts`);
-    } else if (badRatio > 0.2) {
-      points -= 10;
-      flags.push("Deployer has some prior low-scoring contracts");
-    }
+  if (record.collections === 0) {
+    // No settled history is not a good history. No credit either way, and
+    // said out loud so it can't be misread as a clean record.
+    flags.push("Deployer has no collections with a settled outcome yet — unproven, not clean");
+  } else if (record.ruggedRatio > 0.5) {
+    points = 2;
+    flags.push(`Deployer: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
+  } else if (record.ruggedRatio > 0.2) {
+    points -= 10;
+    flags.push(`Deployer: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
+  } else {
+    flags.push(
+      `Deployer: ${record.collections} prior collection(s) settled, none rugged (avg ${record.avgPct.toFixed(0)}%)`
+    );
   }
 
   const chainStats = await getDeployerTxCount(chain, creation.deployerAddress).catch(() => null);

@@ -61,7 +61,8 @@ export async function evaluateNftCollection(bot, { chain, contractAddress, sourc
     triggerWalletAddress: triggerWallet?.address || null,
     telegramMessageId: messageId,
     calledAt: Date.now(),
-    deployerAddress: riskResult.deployerAddress || null,
+    deployerAddress: riskResult.controllerAddress || null,
+    controllerKind: riskResult.controllerKind || null,
   });
 
   // Paper trading always runs alongside real trading, same as the token

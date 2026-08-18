@@ -331,6 +331,14 @@ addColumnIfMissing("called_nft_collections", "outcome_30d_pct", "REAL");
 // low_score_count, which is written from our own risk score — see
 // getNftDeployerRealizedRecord below for why that had to stop.
 addColumnIfMissing("called_nft_collections", "deployer_address", "TEXT");
+// Which KIND of key deployer_address holds: "owner" (from the contract's own
+// owner()/getOwner()/admin()) or "deployer" (from an explorer). Both are
+// addresses that can move a collection's fate, but they are different facts —
+// ownership transfers, deployment doesn't — so pooling them into one
+// reputation record would silently merge two populations. Every read filters
+// on it. Rows written before this column existed have NULL and match nothing,
+// which is correct: we no longer know which kind they were.
+addColumnIfMissing("called_nft_collections", "controller_kind", "TEXT");
 // Pinned calls stay on the Watchlist indefinitely — the milestone checker
 // skips its normal expire-after-window deactivation for them (user-requested
 // "retain" control, the counterpart of the manual remove below).
@@ -838,10 +846,10 @@ export function recordNftCall(entry) {
     INSERT INTO called_nft_collections
       (chain, contract_address, collection_slug, name, image_url, call_floor_price_eth,
        call_volume24h_eth, call_num_owners, call_total_supply, risk_score, risk_grade,
-       source, trigger_wallet_address, telegram_message_id, called_at, deployer_address)
+       source, trigger_wallet_address, telegram_message_id, called_at, deployer_address, controller_kind)
     VALUES (@chain, @contractAddress, @collectionSlug, @name, @imageUrl, @callFloorPriceEth,
        @callVolume24hEth, @callNumOwners, @callTotalSupply, @riskScore, @riskGrade,
-       @source, @triggerWalletAddress, @telegramMessageId, @calledAt, @deployerAddress)
+       @source, @triggerWalletAddress, @telegramMessageId, @calledAt, @deployerAddress, @controllerKind)
     ON CONFLICT(chain, contract_address) DO NOTHING
   `);
   return stmt.run(entry);
@@ -888,7 +896,7 @@ export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }, horizo
   ).run(Date.now(), outcomeFloorEth, outcomePct, id);
 }
 
-// What actually happened to this deployer's previous collections.
+// What actually happened to this controller's previous collections.
 //
 // This exists to replace a feedback loop, not to add a feature. The old
 // per-deployer signal was deployer_history.low_score_count, incremented by
@@ -914,7 +922,7 @@ export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }, horizo
 // drawn at 24h is mostly measuring launch-day volatility, which is the
 // reason the longer horizons exist at all; letting it stand in would put
 // the fast, noisy number back in charge of the slow question.
-export function getNftDeployerRealizedRecord(deployerAddress, { ruggedBelowPct = -60 } = {}) {
+export function getNftControllerRealizedRecord(controllerAddress, { kind, ruggedBelowPct = -60 } = {}) {
   const settled = "COALESCE(outcome_30d_pct, outcome_7d_pct)";
   const row = db
     .prepare(
@@ -924,9 +932,10 @@ export function getNftDeployerRealizedRecord(deployerAddress, { ruggedBelowPct =
               SUM(CASE WHEN ${settled} <= ? THEN 1 ELSE 0 END) rugged
        FROM called_nft_collections
        WHERE LOWER(deployer_address) = LOWER(?)
+         AND controller_kind = ?
          AND ${settled} IS NOT NULL`
     )
-    .get(ruggedBelowPct, deployerAddress);
+    .get(ruggedBelowPct, controllerAddress, kind);
   if (!row || row.n === 0) {
     return { collections: 0, rugged: 0, ruggedRatio: null, avgPct: null, worstPct: null };
   }

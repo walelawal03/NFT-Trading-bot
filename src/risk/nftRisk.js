@@ -1,7 +1,9 @@
 import { getNftSecurity } from "./goplus.js";
 import { getContract, getCollection, getCollectionStats } from "./opensea.js";
 import { getContractCreator, getDeployerTxCount } from "./explorer.js";
-import { getNftDeployerRealizedRecord } from "../store/db.js";
+import { Contract } from "ethers";
+import { getProvider } from "../wallet.js";
+import { getNftControllerRealizedRecord } from "../store/db.js";
 import { detectNftDangerousFunctions, assessNftContractRisk } from "./nftDangerousFunctions.js";
 
 // Same weighting shape as risk/riskScore.js (token side) — contract safety
@@ -97,24 +99,81 @@ function scoreHolderDistribution(stats, totalSupply, flags) {
   return Math.min(WEIGHTS.holderDistribution, points);
 }
 
+// Who controls this collection, asked of the contract rather than of an
+// indexer.
+//
+// The reputation key used to be the deployer, from Etherscan/Blockscout.
+// That does not work here. Etherscan's free plan does not cover Base, and
+// unauthenticated Blockscout allows ~10 requests per ~26 minute window per
+// host while the collection watcher can hand over 100+ contracts from a
+// single poll — so on Robinhood, the primary target chain, the lookup was
+// permanently rate-limited and the reputation graph collected nothing.
+//
+// owner() is one eth_call. No key, no quota, no indexer, and it answers for
+// a contract deployed sixty seconds ago — the same property that makes the
+// bytecode scan the backbone of this bot. Measured coverage on live
+// contracts (2026-08-18): 8/8 on Robinhood, 5/8 on Base, where all three
+// misses were Uniswap/Pancake/Aerodrome position NFTs — infrastructure, not
+// collections anyone would underwrite.
+//
+// It is a DIFFERENT key from the deployer, not a cheaper route to the same
+// one. Ownership transfers; deployment doesn't. For underwriting that trade
+// is worth making: the question is who can pull the levers on this drop
+// now, not who compiled it. But the two must never be pooled into one
+// reputation record, which is why the kind is stored alongside the address
+// and matched on.
+const OWNER_ABI = [
+  "function owner() view returns (address)",
+  "function getOwner() view returns (address)",
+  "function admin() view returns (address)",
+];
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+async function resolveController(chain, contractAddress, flags) {
+  const c = new Contract(contractAddress, OWNER_ABI, getProvider(chain));
+
+  // All three concurrently: ethers coalesces them into one batched request,
+  // so the common case costs a single round trip rather than three.
+  const [owner, getOwner, admin] = await Promise.all([
+    c.owner().catch(() => null),
+    c.getOwner().catch(() => null),
+    c.admin().catch(() => null),
+  ]);
+  const found = [owner, getOwner, admin].find((a) => typeof a === "string" && /^0x[0-9a-fA-F]{40}$/.test(a));
+
+  if (found && found !== ZERO_ADDRESS) return { address: found, kind: "owner" };
+
+  if (found === ZERO_ADDRESS) {
+    // Renounced. Deliberately worth NO points: CLAUDE.md ranks renounced
+    // ownership among the cheap-to-fake signals, and renouncing after a
+    // backdoor is already in the bytecode changes nothing. Recorded because
+    // it explains why there is no owner key, not as a virtue.
+    flags.push("Ownership renounced — no owner to build a record against");
+  }
+
+  // Fall back to the indexer. It still works on chains Etherscan covers on
+  // the free plan, and something is better than nothing when a contract
+  // exposes no ownership accessor at all.
+  const creation = await getContractCreator(chain, contractAddress).catch(() => ({ ok: false, reason: "error" }));
+  if (creation.ok) return { address: creation.deployerAddress, kind: "deployer" };
+
+  if (creation.reason === "rate_limited") flags.push("Deployer lookup rate-limited by the explorer");
+  else if (creation.reason === "unsupported_chain") flags.push("Deployer history unavailable (chain not covered by Etherscan or Blockscout)");
+  else if (creation.reason !== "no_api_key") flags.push("No owner accessor and no deployer record");
+  return null;
+}
+
 // Identical logic to riskScore.js's scoreDeployerHistory — deliberately
 // duplicated rather than shared, matching this codebase's existing pattern
 // of parallel token/NFT (and paper/real trading) modules that stay
 // independently readable rather than sharing a common helper.
 async function scoreDeployerHistory(chain, contractAddress, flags) {
-  const creation = await getContractCreator(chain, contractAddress).catch(() => ({
-    ok: false,
-    reason: "error",
-  }));
+  const controller = await resolveController(chain, contractAddress, flags);
 
-  if (!creation.ok) {
-    if (creation.reason === "unsupported_chain") {
-      flags.push("Deployer history unavailable (chain not covered by Etherscan or Blockscout)");
-    } else if (creation.reason !== "no_api_key") {
-      flags.push("Deployer history unavailable");
-    }
-    return { points: WEIGHTS.deployerHistory * NO_DATA_FACTOR, deployerAddress: null };
+  if (!controller) {
+    return { points: WEIGHTS.deployerHistory * NO_DATA_FACTOR, controllerAddress: null, controllerKind: null };
   }
+  const creation = { ok: true, deployerAddress: controller.address };
 
   // Realized outcomes only. This used to read deployer_history's
   // low_score_count, which nftPipeline.js wrote from THIS function's own
@@ -130,7 +189,7 @@ async function scoreDeployerHistory(chain, contractAddress, flags) {
   // visible to static analysis. Treat the number as unvalidated: there are
   // no NFT outcome rows yet, so nothing has tuned it. Revisit once there
   // are enough resolved collections to look at the distribution.
-  const record = getNftDeployerRealizedRecord(creation.deployerAddress, { ruggedBelowPct: -60 });
+  const record = getNftControllerRealizedRecord(controller.address, { kind: controller.kind, ruggedBelowPct: -60 });
   let points = WEIGHTS.deployerHistory;
 
   if (record.collections === 0) {
@@ -143,16 +202,16 @@ async function scoreDeployerHistory(chain, contractAddress, flags) {
     // distinguish. At mint time that is the common case, so it also inflated
     // exactly the scores a mint-time filter has to threshold on.
     points = Math.round(WEIGHTS.deployerHistory * 0.5);
-    flags.push("Deployer has no collections with a settled outcome yet — unproven, not clean");
+    flags.push(`${controller.kind === "owner" ? "Owner" : "Deployer"} has no collections with a settled outcome yet — unproven, not clean`);
   } else if (record.ruggedRatio > 0.5) {
     points = 2;
-    flags.push(`Deployer: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
+    flags.push(`${controller.kind === "owner" ? "Owner" : "Deployer"}: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
   } else if (record.ruggedRatio > 0.2) {
     points -= 10;
-    flags.push(`Deployer: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
+    flags.push(`${controller.kind === "owner" ? "Owner" : "Deployer"}: ${record.rugged}/${record.collections} prior collections down 60%+ after the call`);
   } else {
     flags.push(
-      `Deployer: ${record.collections} prior collection(s) settled, none rugged (avg ${record.avgPct.toFixed(0)}%)`
+      `${controller.kind === "owner" ? "Owner" : "Deployer"}: ${record.collections} prior collection(s) settled, none rugged (avg ${record.avgPct.toFixed(0)}%)`
     );
   }
 
@@ -162,7 +221,7 @@ async function scoreDeployerHistory(chain, contractAddress, flags) {
     flags.push(`Deployer has created ${chainStats.contractCreations} contracts (serial deployer)`);
   }
 
-  return { points: Math.max(0, points), deployerAddress: creation.deployerAddress };
+  return { points: Math.max(0, points), controllerAddress: controller.address, controllerKind: controller.kind };
 }
 
 function gradeFor(score) {
@@ -208,7 +267,7 @@ export async function computeNftRiskScore(chain, contractAddress) {
   const { points: contractSafety, fatal } = scoreContractSafety(scanVerdict, security, flags);
   const marketplaceLiquidity = scoreMarketplaceLiquidity(collection, stats, flags);
   const holderDistribution = scoreHolderDistribution(stats, totalSupply, flags);
-  const { points: deployerHistory, deployerAddress } = await scoreDeployerHistory(chain, contractAddress, flags);
+  const { points: deployerHistory, controllerAddress, controllerKind } = await scoreDeployerHistory(chain, contractAddress, flags);
 
   const total = fatal ? 0 : Math.round(contractSafety + marketplaceLiquidity + holderDistribution + deployerHistory);
   const { grade, label } = gradeFor(total);
@@ -231,7 +290,10 @@ export async function computeNftRiskScore(chain, contractAddress) {
     security,
     collection,
     stats,
-    deployerAddress,
+    controllerAddress,
+    controllerKind,
+    // Kept for callers that still read the old name; same value.
+    deployerAddress: controllerAddress,
     // The raw scan and its verdict, so the filter can reject on a specific
     // capability rather than only on the aggregate score, and so Telegram
     // can show what was actually found in the bytecode.

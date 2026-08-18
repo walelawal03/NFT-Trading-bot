@@ -312,6 +312,19 @@ addColumnIfMissing("real_trades", "entry_market_cap_usd", "REAL");
 addColumnIfMissing("called_nft_collections", "outcome_checked_at", "INTEGER");
 addColumnIfMissing("called_nft_collections", "outcome_floor_eth", "REAL");
 addColumnIfMissing("called_nft_collections", "outcome_pct", "REAL");
+// Longer horizons, added because 24h answers a different question than the
+// one a deployer's record asks. 24h is the right window for a flip label —
+// did this signal move the floor — and it stays exactly as it was, feeding
+// the copy-trade wallet track record. It is far too short for a rug label:
+// a collection that is going to be abandoned still has a floor the next
+// morning. 7d and 30d are where that shows up.
+addColumnIfMissing("called_nft_collections", "outcome_7d_checked_at", "INTEGER");
+addColumnIfMissing("called_nft_collections", "outcome_7d_floor_eth", "REAL");
+addColumnIfMissing("called_nft_collections", "outcome_7d_pct", "REAL");
+addColumnIfMissing("called_nft_collections", "outcome_30d_checked_at", "INTEGER");
+addColumnIfMissing("called_nft_collections", "outcome_30d_floor_eth", "REAL");
+addColumnIfMissing("called_nft_collections", "outcome_30d_pct", "REAL");
+
 // Who deployed the collection, captured at call time so a deployer's record
 // can later be joined to what actually happened to their drops. Without this
 // column the only per-deployer signal available was deployer_history's
@@ -842,22 +855,37 @@ export function countCalledNft() {
 // above for the mechanism. "Pending" means old enough to check (called
 // before the cutoff) and not yet checked; only rows with a real call-time
 // floor price are eligible (outcome_pct can't be computed from zero).
-export function getNftCallsPendingOutcome(calledBefore) {
+// The horizons a call is snapshotted at. Column names live here rather than
+// in the tracker because they are a storage detail, and because they get
+// interpolated into SQL below — keeping the only source of them a frozen
+// internal table is what makes that safe. Never build one from input.
+export const NFT_OUTCOME_HORIZONS = Object.freeze([
+  { key: "24h", ms: 24 * 60 * 60 * 1000, checkedAt: "outcome_checked_at", floor: "outcome_floor_eth", pct: "outcome_pct" },
+  { key: "7d", ms: 7 * 24 * 60 * 60 * 1000, checkedAt: "outcome_7d_checked_at", floor: "outcome_7d_floor_eth", pct: "outcome_7d_pct" },
+  { key: "30d", ms: 30 * 24 * 60 * 60 * 1000, checkedAt: "outcome_30d_checked_at", floor: "outcome_30d_floor_eth", pct: "outcome_30d_pct" },
+]);
+
+function horizonOrThrow(key) {
+  const h = NFT_OUTCOME_HORIZONS.find((x) => x.key === key);
+  if (!h) throw new Error(`Unknown NFT outcome horizon: ${key}`);
+  return h;
+}
+
+export function getNftCallsPendingOutcome(calledBefore, horizonKey = "24h") {
+  const h = horizonOrThrow(horizonKey);
   return db
     .prepare(
       `SELECT * FROM called_nft_collections
-       WHERE outcome_checked_at IS NULL AND called_at <= ? AND call_floor_price_eth > 0 AND collection_slug IS NOT NULL`
+       WHERE ${h.checkedAt} IS NULL AND called_at <= ? AND call_floor_price_eth > 0 AND collection_slug IS NOT NULL`
     )
     .all(calledBefore);
 }
 
-export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }) {
-  db.prepare("UPDATE called_nft_collections SET outcome_checked_at = ?, outcome_floor_eth = ?, outcome_pct = ? WHERE id = ?").run(
-    Date.now(),
-    outcomeFloorEth,
-    outcomePct,
-    id
-  );
+export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }, horizonKey = "24h") {
+  const h = horizonOrThrow(horizonKey);
+  db.prepare(
+    `UPDATE called_nft_collections SET ${h.checkedAt} = ?, ${h.floor} = ?, ${h.pct} = ? WHERE id = ?`
+  ).run(Date.now(), outcomeFloorEth, outcomePct, id);
 }
 
 // What actually happened to this deployer's previous collections.
@@ -881,16 +909,22 @@ export function recordNftCallOutcome(id, { outcomeFloorEth, outcomePct }) {
 // call-time floor, so they never become eligible at all — see
 // getNftCallsPendingOutcome. Honest emptiness is the point; the loop it
 // replaces was never empty and never right.
+// Uses the longest horizon that has settled for each row — 30d if it is
+// there, else 7d — and deliberately does NOT fall back to 24h. A rug label
+// drawn at 24h is mostly measuring launch-day volatility, which is the
+// reason the longer horizons exist at all; letting it stand in would put
+// the fast, noisy number back in charge of the slow question.
 export function getNftDeployerRealizedRecord(deployerAddress, { ruggedBelowPct = -60 } = {}) {
+  const settled = "COALESCE(outcome_30d_pct, outcome_7d_pct)";
   const row = db
     .prepare(
       `SELECT COUNT(*) n,
-              AVG(outcome_pct) avgPct,
-              MIN(outcome_pct) worstPct,
-              SUM(CASE WHEN outcome_pct <= ? THEN 1 ELSE 0 END) rugged
+              AVG(${settled}) avgPct,
+              MIN(${settled}) worstPct,
+              SUM(CASE WHEN ${settled} <= ? THEN 1 ELSE 0 END) rugged
        FROM called_nft_collections
        WHERE LOWER(deployer_address) = LOWER(?)
-         AND outcome_checked_at IS NOT NULL AND outcome_pct IS NOT NULL`
+         AND ${settled} IS NOT NULL`
     )
     .get(ruggedBelowPct, deployerAddress);
   if (!row || row.n === 0) {

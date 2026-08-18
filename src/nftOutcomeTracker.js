@@ -1,22 +1,26 @@
 import cron from "node-cron";
 import { isPaused } from "./botState.js";
 import { getCollectionStats } from "./risk/opensea.js";
-import { getNftCallsPendingOutcome, recordNftCallOutcome } from "./store/db.js";
+import { getNftCallsPendingOutcome, recordNftCallOutcome, NFT_OUTCOME_HORIZONS } from "./store/db.js";
 
 const CHECK_CRON = "*/30 * * * *";
 
-// How long to wait after a call before snapshotting the outcome — long
-// enough for a copy-trade signal to actually play out (NFT floors move
-// slower than a DEX pool), short enough that this doesn't lag the wallet
-// track record by days. Matches the general timeframe Bonkbot-style token
-// PnL cards care about, just longer since NFTs are less liquid.
-const OUTCOME_HORIZON_MS = 24 * 60 * 60 * 1000;
-
-// Snapshots each eligible call's floor price 24h after it fired and records
-// the % change from call-time floor — the ground truth
-// getWalletTrackRecord() in store/db.js aggregates per wallet. Runs
-// independently of whether the bot ever actually bought anything for that
-// call (paper/real trading could be off, or budget-exhausted) — this
+// Snapshots each eligible call's floor price at every horizon it has become
+// old enough for, recording the % change from call-time floor.
+//
+// Three horizons, because two different questions are being asked of the
+// same rows. 24h is the flip label — did this signal move the floor — and
+// it is what getWalletTrackRecord() aggregates per copy-traded wallet. 7d
+// and 30d are the rug label: a collection that gets abandoned still has a
+// floor the next morning, so 24h cannot see abandonment at all, and that is
+// the horizon a deployer's record is built on (getNftDeployerRealizedRecord).
+//
+// Each horizon has its own checked_at column, so they settle independently
+// and a row keeps accumulating history rather than being finished by the
+// first snapshot.
+//
+// Runs independently of whether the bot ever actually bought anything for
+// that call (paper/real trading could be off, or budget-exhausted) — this
 // measures "was the signal any good," not "did we profit from it."
 export function startNftOutcomeTracker() {
   let running = false;
@@ -25,21 +29,26 @@ export function startNftOutcomeTracker() {
     if (isPaused() || running) return;
     running = true;
     try {
-      const pending = getNftCallsPendingOutcome(Date.now() - OUTCOME_HORIZON_MS);
-      for (const call of pending) {
-        try {
-          const stats = await getCollectionStats(call.collection_slug);
-          const outcomeFloorEth = stats?.floorPriceEth ?? null;
-          const outcomePct =
-            outcomeFloorEth != null && call.call_floor_price_eth > 0
-              ? ((outcomeFloorEth - call.call_floor_price_eth) / call.call_floor_price_eth) * 100
-              : null;
-          recordNftCallOutcome(call.id, { outcomeFloorEth, outcomePct });
-        } catch (err) {
-          // Leave outcome_checked_at unset — retried next cycle. A
-          // transient OpenSea failure shouldn't permanently lose this
-          // call's outcome data.
-          console.error(`[nftOutcomeTracker] failed to check outcome for ${call.name || call.contract_address}:`, err.message);
+      for (const horizon of NFT_OUTCOME_HORIZONS) {
+        const pending = getNftCallsPendingOutcome(Date.now() - horizon.ms, horizon.key);
+        for (const call of pending) {
+          try {
+            const stats = await getCollectionStats(call.collection_slug);
+            const outcomeFloorEth = stats?.floorPriceEth ?? null;
+            const outcomePct =
+              outcomeFloorEth != null && call.call_floor_price_eth > 0
+                ? ((outcomeFloorEth - call.call_floor_price_eth) / call.call_floor_price_eth) * 100
+                : null;
+            recordNftCallOutcome(call.id, { outcomeFloorEth, outcomePct }, horizon.key);
+          } catch (err) {
+            // Leave this horizon's checked_at unset — retried next cycle. A
+            // transient OpenSea failure shouldn't permanently lose this
+            // call's outcome data, and it must not block the other horizons.
+            console.error(
+              `[nftOutcomeTracker] ${horizon.key} check failed for ${call.name || call.contract_address}:`,
+              err.message
+            );
+          }
         }
       }
     } finally {
@@ -47,6 +56,6 @@ export function startNftOutcomeTracker() {
     }
   });
 
-  console.log(`[nftOutcomeTracker] scheduled every 30m, ${OUTCOME_HORIZON_MS / 3600000}h horizon`);
+  console.log(`[nftOutcomeTracker] scheduled every 30m, horizons: ${NFT_OUTCOME_HORIZONS.map((h) => h.key).join(", ")}`);
   return task;
 }

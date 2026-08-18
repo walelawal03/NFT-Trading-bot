@@ -26,7 +26,7 @@ const nextDeployer = () => `0xdep${String(++seq).padStart(37, "0")}`;
 
 // Each case gets its own deployer. The scan suite learned this the hard
 // way: reusing one address made nine of eleven cases pass vacuously.
-function callFor(deployer, { floor = 1, outcomePct = null }) {
+function callFor(deployer, { floor = 1, outcomePct = null, horizon = "7d" }) {
   const contract = `0xc0ffee${String(++seq).padStart(34, "0")}`;
   db.recordNftCall({
     chain: "base", contractAddress: contract, collectionSlug: `slug-${seq}`, name: `n${seq}`,
@@ -36,9 +36,9 @@ function callFor(deployer, { floor = 1, outcomePct = null }) {
     deployerAddress: deployer,
   });
   if (outcomePct !== null) {
-    const row = db.getNftCallsPendingOutcome(Date.now() + 1).find((r) => r.contract_address === contract);
+    const row = db.getNftCallsPendingOutcome(Date.now() + 1, horizon).find((r) => r.contract_address === contract);
     assert.ok(row, "call should be eligible for an outcome");
-    db.recordNftCallOutcome(row.id, { outcomeFloorEth: floor * (1 + outcomePct / 100), outcomePct });
+    db.recordNftCallOutcome(row.id, { outcomeFloorEth: floor * (1 + outcomePct / 100), outcomePct }, horizon);
   }
   return contract;
 }
@@ -99,6 +99,47 @@ t("one deployer's outcomes never leak into another's record", () => {
   assert.equal(db.getNftDeployerRealizedRecord(a).rugged, 1);
   assert.equal(db.getNftDeployerRealizedRecord(b).rugged, 0);
   assert.equal(db.getNftDeployerRealizedRecord(b).collections, 1);
+});
+
+// The point of adding 7d/30d. A 24h snapshot is a flip label; using it as a
+// rug label measures launch-day volatility, so it must not reach the
+// deployer's record at all.
+t("a 24h outcome alone does not build a deployer record", () => {
+  const d = nextDeployer();
+  callFor(d, { outcomePct: -90, horizon: "24h" });
+  const r = db.getNftDeployerRealizedRecord(d);
+  assert.equal(r.collections, 0, "24h must not stand in for the rug horizon");
+});
+
+t("30d supersedes 7d once it settles", () => {
+  const d = nextDeployer();
+  const contract = callFor(d, { outcomePct: -70, horizon: "7d" });
+  assert.equal(db.getNftDeployerRealizedRecord(d).rugged, 1, "7d says rugged");
+
+  // Same row, later horizon: the floor recovered.
+  const row = db.getNftCallsPendingOutcome(Date.now() + 1, "30d").find((r) => r.contract_address === contract);
+  assert.ok(row, "30d must still be pending after 7d settled — horizons are independent");
+  db.recordNftCallOutcome(row.id, { outcomeFloorEth: 1.2, outcomePct: 20 }, "30d");
+
+  const after = db.getNftDeployerRealizedRecord(d);
+  assert.equal(after.collections, 1, "still one collection, not two");
+  assert.equal(after.rugged, 0, "the longest settled horizon wins");
+});
+
+t("settling one horizon leaves the others pending", () => {
+  const d = nextDeployer();
+  const contract = callFor(d, { outcomePct: -30, horizon: "24h" });
+  for (const key of ["7d", "30d"]) {
+    const still = db.getNftCallsPendingOutcome(Date.now() + 1, key).some((r) => r.contract_address === contract);
+    assert.ok(still, `${key} should still be pending after 24h settled`);
+  }
+  const done = db.getNftCallsPendingOutcome(Date.now() + 1, "24h").some((r) => r.contract_address === contract);
+  assert.equal(done, false, "24h should no longer be pending");
+});
+
+t("an unknown horizon is rejected rather than silently querying the wrong column", () => {
+  assert.throws(() => db.getNftCallsPendingOutcome(Date.now(), "90d"), /Unknown NFT outcome horizon/);
+  assert.throws(() => db.recordNftCallOutcome(1, { outcomeFloorEth: 1, outcomePct: 1 }, "1h"), /Unknown NFT outcome horizon/);
 });
 
 // Best-effort teardown. node:sqlite keeps the file handle open for the life

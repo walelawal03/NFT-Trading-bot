@@ -459,8 +459,40 @@ function nftMenuKeyboard() {
   ]);
 }
 
+// Groups the filter list by what each setting actually gates, because the
+// flat key list gives no clue that half of them are inert on a brand-new
+// collection. The source-awareness is real behaviour in nftFilter.js — floor,
+// volume and ownership checks are skipped for `new_collection` calls, since a
+// collection still minting has no market to measure — and someone tuning
+// these on a phone should not have to read the filter source to discover it.
+function renderNftFiltersText(filters) {
+  return [
+    "⚙️ *NFT Filter Settings*",
+    "",
+    `*Contract gate* — runs on every call, mint or secondary:`,
+    `  • Hard gate on fatal capability: ${filters.blockFatalContract ? "on" : "OFF"}`,
+    `  • Reject unreadable contracts: ${filters.blockUnknownContract ? "on" : "OFF"}`,
+    `  • Minimum risk score: ${filters.minRiskScore}`,
+    "",
+    `*Market gate* — skipped for brand-new collections, which have no market yet:`,
+    `  • Floor ${filters.minFloorPriceEth}–${filters.maxFloorPriceEth} ETH, 24h vol ≥ ${filters.minVolume24hEth} ETH`,
+    `  • Owners ≥ ${filters.minOwnerCount}, concentration ≤ ${filters.maxOwnerConcentrationPercent}%`,
+    "",
+    "Tap a setting to change it:",
+  ].join("\n");
+}
+
 function nftFilterKeyboard(filters) {
-  const rows = Object.entries(filters).map(([k, v]) => [Markup.button.callback(`${k}: ${v}`, `nftfilteredit:${k}`)]);
+  // Booleans get a one-tap toggle rather than the type-a-value prompt the
+  // numeric settings use. The generic prompt path does parse "true"/"false"
+  // correctly, but making someone type the word `false` to disarm a safety
+  // gate — on a phone, possibly in a hurry — is the kind of friction that
+  // gets a gate left in the wrong state.
+  const rows = Object.entries(filters).map(([k, v]) =>
+    typeof v === "boolean"
+      ? [Markup.button.callback(`${v ? "✅" : "⬜️"} ${k}`, `nftfiltertoggle:${k}`)]
+      : [Markup.button.callback(`${k}: ${v}`, `nftfilteredit:${k}`)]
+  );
   rows.push([Markup.button.callback("🔙 NFTs", "menu:nft")]);
   return Markup.inlineKeyboard(rows);
 }
@@ -2666,7 +2698,7 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.answerCbQuery();
     if (!requireOpensea(ctx)) return;
     const filters = loadNftFilters();
-    await safeEdit(ctx, "⚙️ *NFT Filter Settings*\n\nTap a setting to change it:", nftFilterKeyboard(filters));
+    await safeEdit(ctx, renderNftFiltersText(filters), nftFilterKeyboard(filters));
   });
 
   bot.action(/^nftfilteredit:(.+)$/, async (ctx) => {
@@ -2677,6 +2709,20 @@ export function createBot(stats, chainControls, digestControls) {
     if (!(key in filters)) return ctx.reply("Unknown filter key.");
     setPending(ctx.chat.id, { type: "nftFilter", key });
     await ctx.reply(`Send the new value for *${key}* (current: ${filters[key]}):`, { parse_mode: "Markdown" });
+  });
+
+  bot.action(/^nftfiltertoggle:(.+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return ctx.reply("Not authorized to change filters.");
+    const key = ctx.match[1];
+    const filters = loadNftFilters();
+    if (!(key in filters) || typeof filters[key] !== "boolean") return ctx.reply("Unknown filter key.");
+
+    filters[key] = !filters[key];
+    saveNftFilters(filters);
+
+    // Redraw in place so the checkbox reflects the new state immediately.
+    await safeEdit(ctx, renderNftFiltersText(filters), nftFilterKeyboard(filters));
   });
 
   bot.action("menu:nftwallets", async (ctx) => {

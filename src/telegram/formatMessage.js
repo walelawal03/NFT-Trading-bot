@@ -493,12 +493,26 @@ export function buildNftCallMessage({ chain, contractAddress, riskResult, source
   const sourceTag =
     source === "copy_trade" ? `👤 *Copy Signal* — ${escapeMd(triggerWalletLabel) || "a watched wallet"} just bought in` : "🆕 *New Collection*";
 
+  // Where contract safety came from. At mint time this is usually the only
+  // category carrying real information — marketplace liquidity and holder
+  // distribution are structurally near-zero before a market exists — so the
+  // reader should be able to see whether the 35 was earned by a scan that
+  // succeeded or defaulted from one that didn't.
+  const verdict = riskResult.contractVerdict;
+  const scanTag = !verdict
+    ? ""
+    : verdict.fatal
+      ? " 🚨 hard gate"
+      : verdict.unknown
+        ? " ⚪️ unreadable"
+        : ` via \`${riskResult.contractScan?.proxy?.via ?? "direct"}\``;
+
   const lines = [
     `📣 *NEW NFT CALL* — ${escapeMd(name) || "Unknown"} on ${chain.label}`,
     sourceTag,
     "",
     `${gradeEmoji[grade]} *Risk Score: ${score}/100 — ${grade} (${label})*`,
-    `  • Contract safety: ${breakdown.contractSafety}/35`,
+    `  • Contract safety: ${breakdown.contractSafety}/35${scanTag}`,
     `  • Marketplace liquidity: ${breakdown.marketplaceLiquidity}/25`,
     `  • Holder distribution: ${breakdown.holderDistribution}/20`,
     `  • Deployer history: ${breakdown.deployerHistory}/20`,

@@ -6,9 +6,61 @@ import { getWalletTrackRecord } from "../store/db.js";
 
 const filtersPath = path.join(getDataDir(), "nftFilters.json");
 
+// Merged over the persisted file on every load, following the same
+// `{ ...DEFAULTS, ...raw }` discipline as the trading-settings loaders.
+//
+// This is not cosmetic. A volume that already holds an nftFilters.json from
+// before these keys existed would read them as undefined, and `undefined &&
+// verdict.fatal` is falsy — so the two contract gates would be silently OFF
+// on exactly the deployments that have been running longest. A safety gate
+// that disappears when a config file is merely old is worse than one that
+// was never added. Defaults on, and a persisted false still wins.
+// Where minRiskScore: 40 comes from, and what it depends on.
+//
+// At mint time the score is near-deterministic, because two of the four
+// categories have nothing to read: marketplace liquidity is 0 (no floor, no
+// volume, not yet safelisted) and holder distribution falls to NO_DATA_FACTOR
+// (6/20). So:
+//
+//     score = (35 - scan deduction) + 0 + 6 + deployerHistory
+//
+// Against 50 live Base and Robinhood contracts the resulting distribution has
+// a clean gap between 39 and 41, and 40 sits in it — rejecting the two fatal
+// contracts, the pausable one, both with mutable metadata on a centralised
+// host, and the unreadable one. 45 would have rejected 46%, including
+// ordinary upgradeable proxies. The number is the gap in the data, not a
+// preference.
+//
+// CAVEAT, and it is a sharp one: deployerHistory is 10 when the deployer
+// resolves (unproven) and 6 when it cannot (no ETHERSCAN_API_KEY, or the
+// Blockscout fallback failing). That 4-point shift moves the whole baseline
+// from 51 to 47 and, at minRiskScore 40, moves rejection from 14% to 44% of
+// the same 50 contracts — without a single contract having changed. If
+// deployer resolution is not working, this threshold is far stricter than it
+// looks. Verify ETHERSCAN_API_KEY is set before trusting the 40.
+//
+// The two contract gates below do not have this problem: they read the scan
+// verdict directly and are independent of the score and of every aggregator.
+const DEFAULTS = {
+  minFloorPriceEth: 0,
+  maxFloorPriceEth: 5,
+  minVolume24hEth: 0,
+  minOwnerCount: 20,
+  maxOwnerConcentrationPercent: 90,
+  requireSafelistedOrVerified: false,
+  blockMalicious: true,
+  blockFatalContract: true,
+  blockUnknownContract: true,
+  minRiskScore: 40,
+  minCopyTradeBuyEth: 0,
+  minWalletSignals: 0,
+  minWalletWinRatePercent: 0,
+};
+
 export function loadNftFilters() {
   seedFileIfMissing("nftFilters.json");
-  return JSON.parse(fs.readFileSync(filtersPath, "utf8"));
+  if (!fs.existsSync(filtersPath)) return { ...DEFAULTS };
+  return { ...DEFAULTS, ...JSON.parse(fs.readFileSync(filtersPath, "utf8")) };
 }
 
 export function saveNftFilters(filters) {
@@ -53,6 +105,25 @@ export function applyNftFilter(riskResult, { source, triggerBuyPriceEth, trigger
   const { security, stats, collection, totalSupply, score } = riskResult;
 
   if (score < filters.minRiskScore) reasons.push(`Risk score ${score} below minimum ${filters.minRiskScore}`);
+
+  // The bytecode gate, stated as its own reason rather than left to be
+  // implied by the score. A fatal verdict already forces the score to 0 in
+  // nftRisk.js, so this line changes no decision — it changes the Telegram
+  // message from "score 0 below minimum 40", which reads like a data
+  // problem, into the specific capability that disqualified the contract.
+  const verdict = riskResult.contractVerdict;
+  if (filters.blockFatalContract && verdict?.fatal) {
+    const why = verdict.flags.filter((f) => f.startsWith("🚨")).join("; ") || "fatal contract capability";
+    reasons.push(`Hard contract gate: ${why}`);
+  }
+
+  // An unreadable contract is not a safe contract. Separate from the score
+  // so it can be turned off independently: on a chain or a bytecode layout
+  // the scanner handles badly this would otherwise reject everything, and
+  // that failure should be one toggle away rather than a code change.
+  if (filters.blockUnknownContract && verdict?.unknown) {
+    reasons.push("Contract capability scan came back unknown — not treated as clean");
+  }
 
   if (source !== "new_collection") {
     const floor = stats?.floorPriceEth || 0;
@@ -99,13 +170,23 @@ export function applyNftFilter(riskResult, { source, triggerBuyPriceEth, trigger
     }
   }
 
-  const numOwners = stats?.numOwners ?? 0;
-  if (numOwners < filters.minOwnerCount) reasons.push(`Owner count ${numOwners} below minimum ${filters.minOwnerCount}`);
+  // Ownership checks moved under the same source guard as floor and volume,
+  // and for exactly the same reason spelled out above them. A collection
+  // still minting has almost no owners and therefore near-100% measured
+  // concentration — not because it is concentrated, but because nobody has
+  // minted yet. Left unconditional (as these were), raising minOwnerCount
+  // above 0 would have silently blocked every new_collection call forever,
+  // which is the specific trap that kept all these thresholds pinned at
+  // no-op defaults in the first place.
+  if (source !== "new_collection") {
+    const numOwners = stats?.numOwners ?? 0;
+    if (numOwners < filters.minOwnerCount) reasons.push(`Owner count ${numOwners} below minimum ${filters.minOwnerCount}`);
 
-  if (stats?.numOwners != null && totalSupply) {
-    const concentrationPct = (1 - stats.numOwners / totalSupply) * 100;
-    if (concentrationPct > filters.maxOwnerConcentrationPercent) {
-      reasons.push(`Ownership concentration ${concentrationPct.toFixed(0)}% above maximum ${filters.maxOwnerConcentrationPercent}%`);
+    if (stats?.numOwners != null && totalSupply) {
+      const concentrationPct = (1 - stats.numOwners / totalSupply) * 100;
+      if (concentrationPct > filters.maxOwnerConcentrationPercent) {
+        reasons.push(`Ownership concentration ${concentrationPct.toFixed(0)}% above maximum ${filters.maxOwnerConcentrationPercent}%`);
+      }
     }
   }
 

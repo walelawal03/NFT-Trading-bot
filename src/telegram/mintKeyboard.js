@@ -1,6 +1,7 @@
 import { Markup } from "telegraf";
 import { formatEther } from "ethers";
-import { totalCostWei, loadMintWallets } from "../mint/mintSession.js";
+import { totalCostWei } from "../mint/mintSession.js";
+import { countMintWallets } from "../mint/mintWallets.js";
 
 // The mint configuration keyboard.
 //
@@ -14,7 +15,7 @@ export function buildMintConfigText(config) {
   const { detect } = config;
   const unit = config.priceOverrideWei ?? detect.phase?.priceWei ?? null;
   const total = totalCostWei(config);
-  const walletsAvailable = loadMintWallets().length;
+  const walletsAvailable = countMintWallets();
 
   const lines = [
     `⚙️ *Configure mint — ${detect.name || "collection"}*`,
@@ -41,7 +42,7 @@ export function buildMintConfigText(config) {
 export function mintConfigKeyboard(config) {
   const { detect } = config;
   const max = detect.phase?.maxPerWallet ?? null;
-  const walletsAvailable = loadMintWallets().length;
+  const walletsAvailable = countMintWallets();
   const atMax = max != null && config.quantity >= max;
 
   return Markup.inlineKeyboard([

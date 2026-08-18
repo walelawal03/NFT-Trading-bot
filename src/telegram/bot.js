@@ -77,6 +77,7 @@ import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
+import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
 import { loadNftFilters, saveNftFilters } from "../filters/nftFilter.js";
@@ -404,7 +405,12 @@ function unlockRealTrading(chatId) {
 // Returns true if the caller may proceed.
 async function requireRealTradingUnlock(ctx) {
   if (!config.realTradingPasscode) {
-    await ctx.answerCbQuery?.("Real trading is not configured.");
+    // Branch on the update kind, not on the method existing. Context always
+    // defines answerCbQuery and throws when the update is a message — and the
+    // message path is exactly how a private key arrives, so the optional call
+    // threw out of the import handler instead of explaining the lockout.
+    // Same defect as requireOpensea had.
+    if (ctx.callbackQuery) await ctx.answerCbQuery("Real trading is not configured.");
     await ctx.reply("⚠️ Real Funds Trading is locked out — no REAL_TRADING_PASSCODE is set in .env.");
     return false;
   }
@@ -1610,6 +1616,32 @@ async function handlePendingAction(ctx, pending, text, digestControls) {
     return performIdSell(ctx, pending.id, pct);
   }
 
+  if (pending.type === "mintWalletImport") {
+    if (!(await requireRealTradingUnlock(ctx))) return;
+    // Scrub before parsing, exactly like walletImportKey below: the key should
+    // not linger in chat history whether or not it turned out to be valid.
+    await ctx.deleteMessage(ctx.message.message_id).catch(() => {});
+    const results = importMintWallets(text);
+    const ok = results.filter((r) => r.ok);
+    const bad = results.filter((r) => !r.ok);
+    const lines = [`✅ Imported ${ok.length} wallet(s).`];
+    for (const r of ok) lines.push(`  \`${r.address}\``);
+    // Rejections are reported by line number, never by content — echoing a
+    // rejected line back could put a real key into chat history after the
+    // original message was already deleted.
+    for (const r of bad) lines.push(`  ⚠️ line ${r.line}: ${r.reason}`);
+    lines.push("", `Roster now holds ${countMintWallets()} wallet(s).`);
+    return ctx.reply(lines.join("\n"), { parse_mode: "Markdown", ...backKeyboard() });
+  }
+
+  if (pending.type === "mintWalletRemove") {
+    const removed = removeMintWallet(text.trim());
+    return ctx.reply(
+      removed ? `Removed. Roster now holds ${countMintWallets()} wallet(s).` : "No wallet with that address in the roster.",
+      { ...backKeyboard() }
+    );
+  }
+
   if (pending.type === "walletImportKey") {
     if (!(await requireRealTradingUnlock(ctx))) return;
     const rawKey = text.trim();
@@ -2731,6 +2763,70 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.reply(`Send the new value for *${key}* (current: ${filters[key]}):`, { parse_mode: "Markdown" });
   });
 
+  // ── Mint wallets ──────────────────────────────────────────────────────
+  // Keys are IMPORTED, never generated. A bot that mints its own keys decides
+  // how much of your money lives somewhere you did not choose.
+  const renderMintWallets = () => {
+    const wallets = listMintWallets();
+    if (wallets.length === 0) {
+      return [
+        "💼 *Mint wallets*",
+        "",
+        "None imported.",
+        "",
+        "Fund these with what a mint costs, not a treasury — keys are stored in",
+        "plaintext on this machine, the same trust boundary as the trading wallet.",
+      ].join("\n");
+    }
+    return [
+      `💼 *Mint wallets* (${wallets.length})`,
+      "",
+      ...wallets.map((w, i) => `${i + 1}. \`${w.address}\``),
+      "",
+      "_Keys are stored in plaintext on this machine. Fund these with mint money only._",
+    ].join("\n");
+  };
+
+  const mintWalletsKeyboard = () =>
+    Markup.inlineKeyboard([
+      [Markup.button.callback("➕ Import private key(s)", "mintwallet:import")],
+      ...(countMintWallets() > 0 ? [[Markup.button.callback("🗑 Remove one", "mintwallet:removeprompt")]] : []),
+      [Markup.button.callback("🔙 Menu", "menu:home")],
+    ]);
+
+  bot.command("mintwallets", async (ctx) => {
+    if (!isAdmin(ctx)) return ctx.reply("Not authorized.");
+    await ctx.reply(renderMintWallets(), { parse_mode: "Markdown", ...mintWalletsKeyboard() });
+  });
+
+  bot.action("menu:mintwallets", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    await safeEdit(ctx, renderMintWallets(), mintWalletsKeyboard());
+  });
+
+  bot.action("mintwallet:import", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    if (!(await requireRealTradingUnlock(ctx))) return;
+    setPending(ctx.chat.id, { type: "mintWalletImport" });
+    await ctx.reply(
+      [
+        "Paste the private key(s) — one per line, or separated by spaces.",
+        "",
+        "The message is deleted the moment it arrives, valid or not.",
+        "Fund these with what a mint costs. Not a main wallet.",
+      ].join("\n")
+    );
+  });
+
+  bot.action("mintwallet:removeprompt", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    setPending(ctx.chat.id, { type: "mintWalletRemove" });
+    await ctx.reply("Send the address to remove.");
+  });
+
   // ── Mint configuration ────────────────────────────────────────────────
   // Every control re-renders from the session, so the numbers on screen are
   // always the ones a mint would use. Nothing here signs or sends.
@@ -2770,7 +2866,7 @@ export function createBot(stats, chainControls, digestControls) {
   // failed silently, and this bot has no signing path at all yet.
   const notArmed = (what) => async (ctx) => {
     await ctx.answerCbQuery();
-    const wallets = mintSession.loadMintWallets().length;
+    const wallets = countMintWallets();
     await ctx.reply(
       [
         `⛔️ *${what} is not wired up yet.*`,
@@ -2794,7 +2890,7 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.answerCbQuery();
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — run /mint again.");
-    const wallets = mintSession.loadMintWallets();
+    const wallets = listMintWallets();
     if (wallets.length === 0) {
       return ctx.reply(
         "No wallets loaded. Add addresses to `data/mintWallets.json` as `{ \"wallets\": [\"0x…\"] }` to check eligibility.",

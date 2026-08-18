@@ -1,6 +1,4 @@
-import fs from "node:fs";
-import path from "node:path";
-import { getDataDir } from "../dataDir.js";
+import { countMintWallets } from "./mintWallets.js";
 
 // The in-progress mint configuration for one chat: which collection, how many
 // per wallet, across how many wallets, at what price.
@@ -12,24 +10,10 @@ import { getDataDir } from "../dataDir.js";
 // back to /mint, which re-reads the chain.
 const sessions = new Map(); // chatId -> config
 
-// Wallets available to mint from. A separate gitignored file rather than
-// .env, because this is a list that grows and because .env is copied around
-// far more casually than a file with "wallets" in the name.
-//
-// Empty by default and never auto-created with keys. The roster only holds
-// ADDRESSES here — this module never reads private keys, so nothing in the
-// configuration path can spend. Signing is the executor's problem, and it
-// does not exist yet.
-const walletsPath = () => path.join(getDataDir(), "mintWallets.json");
-
-export function loadMintWallets() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(walletsPath(), "utf8"));
-    return Array.isArray(raw?.wallets) ? raw.wallets : [];
-  } catch {
-    return [];
-  }
-}
+// Wallet roster lives in mint/mintWallets.js. Imported here by ADDRESS COUNT
+// only — this module never touches a private key, so nothing in the
+// configuration path can spend.
+export { countMintWallets as walletCount } from "./mintWallets.js";
 
 // Clamp helper that treats "unknown" as "no ceiling we can prove". A contract
 // that does not publish a per-wallet cap is not the same as one that caps at
@@ -38,7 +22,7 @@ const clamp = (n, min, max) => Math.max(min, max == null ? n : Math.min(n, max))
 
 export function startSession(chatId, { chain, contractAddress, detect }) {
   const maxPerWallet = detect.phase?.maxPerWallet ?? null;
-  const walletCount = loadMintWallets().length;
+  const walletCount = countMintWallets();
 
   const config = {
     chain,
@@ -82,7 +66,7 @@ export function setQuantityMax(chatId) {
 export function adjustWallets(chatId, delta) {
   const c = sessions.get(chatId);
   if (!c) return null;
-  c.wallets = clamp(c.wallets + delta, 0, loadMintWallets().length);
+  c.wallets = clamp(c.wallets + delta, 0, countMintWallets());
   return c;
 }
 

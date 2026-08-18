@@ -15,8 +15,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.TELEGRAM_BOT_TOKEN ||= "111:offline";
-process.env.TELEGRAM_CHAT_ID ||= "424242";
+// Set before anything imports config.js, which pulls in dotenv. dotenv does
+// not overwrite variables that already exist, so this pins the test's
+// identity regardless of what a developer's real .env holds.
+//
+// ADMIN_USER_ID matters more than it looks: bot.js installs a global
+// middleware that DROPS any update whose from.id doesn't match it. Inherit a
+// real admin id from .env and every case here silently receives nothing and
+// fails with an empty capture — which reads like the handlers are broken.
+process.env.TELEGRAM_BOT_TOKEN = "111:offline";
+process.env.TELEGRAM_CHAT_ID = "424242";
+process.env.ADMIN_USER_ID = "424242";
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tgsmoke-"));
 process.env.RAILWAY_VOLUME_MOUNT_PATH = tmp;
 

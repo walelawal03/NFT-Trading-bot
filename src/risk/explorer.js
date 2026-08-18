@@ -45,15 +45,46 @@ async function getContractCreatorFromEtherscan(etherscanChainId, tokenAddress) {
 // all). Used as a fallback for chains chains.js gives a blockscoutBaseUrl,
 // so deployer-history tracking (scoreDeployerHistory below) isn't
 // permanently blind on chains outside Etherscan's coverage.
+// Blockscout's free tier rate-limits, and a burst is exactly what this bot
+// produces: the collection watcher hands over a whole poll cycle at once
+// (107 collections on one startup, observed 2026-08-18), each wanting a
+// deployer lookup. Every one past the limit came back 429, got swallowed by
+// the catch in getContractCreator as a generic "error", and scored
+// NO_DATA_FACTOR — the deployer graph quietly collecting nothing under load,
+// which is the failure mode it can least afford.
+//
+// One retry on 429, honouring Retry-After when the server sends it. This
+// does not fix sustained overload — only a real limiter would, and that is
+// worth doing if backfills stay this large — but it recovers the common case
+// where a burst briefly crosses the line.
+const RETRY_AFTER_FALLBACK_MS = 1500;
+
+async function blockscoutFetch(url, attempt = 0) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(20000) });
+  if (res.status !== 429 || attempt > 0) return res;
+
+  const header = Number(res.headers.get("retry-after"));
+  const waitMs = Number.isFinite(header) && header > 0 ? Math.min(header * 1000, 10000) : RETRY_AFTER_FALLBACK_MS;
+  await new Promise((r) => setTimeout(r, waitMs));
+  return blockscoutFetch(url, attempt + 1);
+}
+
 async function getContractCreatorFromBlockscout(blockscoutBaseUrl, tokenAddress) {
   const params = new URLSearchParams({
     module: "contract",
     action: "getcontractcreation",
     contractaddresses: tokenAddress,
   });
-  const res = await fetch(`${blockscoutBaseUrl}/api?${params}`, { signal: AbortSignal.timeout(20000) });
+  const res = await blockscoutFetch(`${blockscoutBaseUrl}/api?${params}`);
+  // Distinguish "we were throttled" from "this contract has no creation
+  // record". Both used to land as a bare throw and then "error", which made
+  // a rate limit indistinguishable from a genuine miss in every log.
+  if (res.status === 429) return { ok: false, reason: "rate_limited" };
   if (!res.ok) throw new Error(`Blockscout API error ${res.status}: ${await res.text()}`);
   const body = await res.json();
+  // A brand-new contract legitimately returns an empty result: the indexer
+  // has not caught up yet. That is the normal state for a mint we would
+  // underwrite, so it is "not_found", not a failure.
   if (!Array.isArray(body.result) || body.result.length === 0) return { ok: false, reason: "not_found" };
   return {
     ok: true,

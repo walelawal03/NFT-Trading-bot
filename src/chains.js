@@ -95,6 +95,16 @@ export const CHAINS = {
     // 2026-08-16), so one list covers both jobs here.
     httpRpcUrls: ["https://mainnet.base.org"],
     logRpcUrls: ["https://mainnet.base.org", "https://base-rpc.publicnode.com"],
+    // Base IS on Etherscan V2, but not on the free plan: getcontractcreation
+    // returns "Free API access is not supported for this chain. Please
+    // upgrade your api plan." Without a fallback that left every Base
+    // collection with deployerAddress: null — so deployer_address was null
+    // on every recorded call and the realized deployer record had nothing to
+    // join on. Silent, and permanent: the category just scored
+    // NO_DATA_FACTOR forever while looking like it was working.
+    // Verified live 2026-08-18: base.blockscout.com answers the same
+    // Etherscan-shaped getcontractcreation, free and unauthenticated.
+    blockscoutBaseUrl: "https://base.blockscout.com",
     nativeSymbol: "ETH",
     factories: [
       uniswapV2Factory("0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"),

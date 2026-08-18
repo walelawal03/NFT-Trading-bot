@@ -61,7 +61,10 @@ export function buildMintDetectMessage({ chain, contractAddress, detect }) {
 
   if (detect.phase) {
     lines.push(
-      `• Price: ${fmtEth(detect.phase.priceWei)}${detect.phase.feeBps ? ` (+${detect.phase.feeBps / 100}% fee)` : ""}`,
+      // feeBps is a SPLIT of mintPrice, not a surcharge: SeaDrop requires
+      // msg.value == quantity * mintPrice exactly. Showing "+10% fee" implied
+      // the mint cost 10% more than it does.
+      `• Price: ${fmtEth(detect.phase.priceWei)}${detect.phase.feeBps ? ` (${detect.phase.feeBps / 100}% of that is marketplace fee)` : ""}`,
       `• Max per wallet: ${detect.phase.maxPerWallet ?? "unknown"}`
     );
     if (detect.phase.startsAt) lines.push(`• Opens: ${fmtWhen(detect.phase.startsAt)}`);

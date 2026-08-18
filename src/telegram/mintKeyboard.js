@@ -24,7 +24,7 @@ export function buildMintConfigText(config) {
     `• Wallets: *${config.wallets}*${walletsAvailable ? ` of ${walletsAvailable} loaded` : " — none loaded"}`,
     `• Price each: *${fmt(unit)} ETH*${config.priceOverrideWei != null ? " _(override)_" : " _(from contract)_"}`,
     `• Total: *${total == null ? "unknown" : `${Number(formatEther(total))} ETH`}*` +
-      `${detect.phase?.feeBps ? ` _(+${detect.phase.feeBps / 100}% fee at mint)_` : ""}`,
+      `${detect.phase?.feeBps ? ` _(incl. ${detect.phase.feeBps / 100}% marketplace fee)_` : ""}`,
   ];
 
   // State that would stop the mint belongs above the buttons, not behind

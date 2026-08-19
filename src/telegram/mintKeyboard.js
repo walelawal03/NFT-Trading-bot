@@ -3,6 +3,7 @@ import { formatEther } from "ethers";
 import { totalCostWei } from "../mint/mintSession.js";
 import { countMintWallets } from "../mint/mintWallets.js";
 import { explorerUrlFor } from "./formatMessage.js";
+import { openseaChainSlug } from "../risk/opensea.js";
 
 // One message: what the drop is, and the controls to mint it.
 //
@@ -86,12 +87,26 @@ export function buildMintConfigText(config) {
   if (unit == null) blockers.push("price unknown");
   if (blockers.length) lines.push("", `⛔️ *Can't mint:* ${blockers.join(", ")}`);
 
+  // OpenSea first — it is what you actually want to look at for a drop, and
+  // the explorer is the fallback for a collection OpenSea has not indexed
+  // (which, for a mint this bot cares about, is most of them at first).
+  //
+  // Send this with link previews DISABLED. Telegram expands the first link
+  // into a preview card, and the explorer's card is a wall of grey text that
+  // pushed the mint buttons off the bottom of the screen.
   const explorer = explorerUrlFor(chain.key, contractAddress);
-  lines.push("", `\`${contractAddress}\``);
-  if (explorer) lines.push(`[View contract](${explorer})`);
+  const opensea = `https://opensea.io/assets/${openseaChainSlug(chain.key)}/${contractAddress}`;
+  lines.push(
+    "",
+    `\`${contractAddress}\``,
+    [`[OpenSea](${opensea})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
+  );
 
   return lines.join("\n");
 }
+
+// Pass this alongside parse_mode wherever the mint card is sent or edited.
+export const MINT_CARD_EXTRA = { parse_mode: "Markdown", link_preview_options: { is_disabled: true } };
 
 export function mintConfigKeyboard(config) {
   const { detect } = config;

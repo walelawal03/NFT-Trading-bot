@@ -2,7 +2,7 @@ import { CHAINS } from "../chains.js";
 import { getNftChainKeys } from "../nftChains.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, MINT_CARD_EXTRA } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 
 // Paste a contract address or a mint link; get mint options. No command.
@@ -119,7 +119,7 @@ export async function handlePastedTarget(ctx, text) {
       // report when there are no controls to show.
       if (detect.mintVia) {
         const config = mintSession.startSession(ctx.chat.id, { chain, contractAddress: target.address, detect });
-        await ctx.reply(buildMintConfigText(config), { parse_mode: "Markdown", ...mintConfigKeyboard(config) });
+        await ctx.reply(buildMintConfigText(config), { ...MINT_CARD_EXTRA, ...mintConfigKeyboard(config) });
       } else {
         await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
           parse_mode: "Markdown",

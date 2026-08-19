@@ -75,7 +75,7 @@ import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftD
 import { buildNftScanMessage } from "./formatNftScan.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, MINT_CARD_EXTRA } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget } from "./handlePaste.js";
 import { executeMint, findMaxMintable } from "../mint/nftMintExecutor.js";
@@ -989,9 +989,9 @@ async function renderTracklistText() {
   return `📋 *Tracklist* (${tracks.length})\n\n${lines.join("\n\n")}`;
 }
 
-async function safeEdit(ctx, text, keyboard) {
+async function safeEdit(ctx, text, keyboard, extra = {}) {
   try {
-    await ctx.editMessageText(text, { parse_mode: "Markdown", ...keyboard });
+    await ctx.editMessageText(text, { parse_mode: "Markdown", ...extra, ...keyboard });
   } catch (err) {
     if (!/message is not modified/i.test(err.description || err.message || "")) {
       console.error("editMessageText failed:", err.message);
@@ -2827,7 +2827,7 @@ export function createBot(stats, chainControls, digestControls) {
   // always the ones a mint would use. Nothing here signs or sends.
   const redrawMint = async (ctx, config) => {
     if (!config) return ctx.answerCbQuery("That mint session expired — run /mint again.");
-    await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config));
+    await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), MINT_CARD_EXTRA);
   };
 
   bot.action("mint:noop", (ctx) => ctx.answerCbQuery());
@@ -2847,7 +2847,7 @@ export function createBot(stats, chainControls, digestControls) {
         contractAddress: current.contractAddress,
         detect,
       });
-      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config));
+      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), MINT_CARD_EXTRA);
     } catch (err) {
       await ctx.reply(`Couldn't refresh: ${err.message}`);
     }

@@ -159,24 +159,50 @@ export async function getAccountEvents(address, { eventType = "sale", chain = "e
 // wallet bought is no longer for sale) and "buy the floor once a brand-new
 // collection has any listing at all". Returns null if nothing is listed.
 export async function getCheapestListing(chainKey, contractAddress) {
-  const body = await request(`/orders/${openseaChainSlug(chainKey)}/seaport/listings`, {
-    params: { asset_contract_address: contractAddress, order_by: "eth_price", order_direction: "asc", limit: 1 },
-  });
-  const order = body.orders?.[0];
-  if (!order) return null;
-  const offerItem = order.protocol_data?.parameters?.offer?.[0];
-  const considerationTotal = (order.protocol_data?.parameters?.consideration || []).reduce(
-    (sum, c) => sum + Number(c.startAmount || 0),
-    0
-  );
-  return {
-    orderHash: order.order_hash,
-    protocolAddress: order.protocol_address,
-    tokenId: offerItem?.identifierOrCriteria || null,
-    priceEth: considerationTotal > 0 ? considerationTotal / 1e18 : Number(order.current_price || 0) / 1e18,
-    raw: order,
-  };
+  // Contract-addressed first, slug-addressed as the fallback.
+  //
+  // /orders/{chain}/seaport/listings returns 405 Method Not Allowed on
+  // Robinhood Chain — verified live 2026-08-19 against two collections that
+  // both have active listings. It is not that the collections had nothing for
+  // sale; the endpoint is simply not served for that chain. Every caller of
+  // this function therefore concluded "no fulfillable listing" and refused to
+  // buy anything on the bot's primary target chain.
+  //
+  // The fallback costs one extra request (contract -> slug) and only on the
+  // chains where the first call fails, so the path that already worked is
+  // unchanged and no faster route is given up.
+  try {
+    const body = await request(`/orders/${openseaChainSlug(chainKey)}/seaport/listings`, {
+      params: { asset_contract_address: contractAddress, order_by: "eth_price", order_direction: "asc", limit: 1 },
+    });
+    const order = body.orders?.[0];
+    if (order) {
+      const offerItem = order.protocol_data?.parameters?.offer?.[0];
+      const considerationTotal = (order.protocol_data?.parameters?.consideration || []).reduce(
+        (sum, c) => sum + Number(c.startAmount || 0),
+        0
+      );
+      return {
+        orderHash: order.order_hash,
+        protocolAddress: order.protocol_address,
+        tokenId: offerItem?.identifierOrCriteria || null,
+        priceEth: considerationTotal > 0 ? considerationTotal / 1e18 : Number(order.current_price || 0) / 1e18,
+        raw: order,
+      };
+    }
+    // A 200 with no orders is a real answer: nothing is listed.
+    return null;
+  } catch (err) {
+    // Only an endpoint-level rejection justifies the fallback. Anything else
+    // (auth, rate limit) would fail the same way twice and should surface.
+    if (!/40[45]/.test(String(err.message))) throw err;
+
+    const info = await getContract(chainKey, contractAddress).catch(() => null);
+    if (!info?.slug) return null;
+    return getBestListingBySlug(info.slug);
+  }
 }
+
 
 // Ready-to-send transaction data for fulfilling a listing (buy path) — see
 // docs.opensea.io/reference/generate_listing_fulfillment_data_v2. Returned

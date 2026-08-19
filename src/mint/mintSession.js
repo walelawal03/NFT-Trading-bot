@@ -127,3 +127,11 @@ export function setWalletCount(chatId, n) {
   c.wallets = Math.max(0, Math.min(Math.floor(n), countMintWallets()));
   return c;
 }
+
+// The most recent confirmed mint for this chat, so the listing controls know
+// which token ids they may sell. Deliberately not the wallet's whole balance:
+// listing unrelated holdings because they share a contract is not something a
+// mint confirmation should be able to do.
+const lastResults = new Map();
+export function setLastResult(chatId, result) { lastResults.set(chatId, result); }
+export function getLastResult(chatId) { return lastResults.get(chatId) ?? null; }

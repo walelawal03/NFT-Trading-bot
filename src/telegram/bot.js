@@ -75,11 +75,12 @@ import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftD
 import { buildNftScanMessage } from "./formatNftScan.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, mintCardExtra, buildMintResultText, mintResultKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget, loadCardExtras } from "./handlePaste.js";
 import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
-import { buyNftCollectionFloor } from "../execution/nftExecutor.js";
+import { buyNftCollectionFloor, listNftForSale } from "../execution/nftExecutor.js";
+import { confirmMint } from "../mint/mintResult.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
@@ -3092,10 +3093,93 @@ export function createBot(stats, chainControls, digestControls) {
         ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
       ];
       await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+
+      // A hash is not a result. Wait for the receipt and report what the
+      // wallet actually owns — a mint can revert, or deliver fewer than asked.
+      const landed = sent.filter((r) => r.txHash);
+      if (landed.length) {
+        await ctx.reply("Waiting for confirmation…");
+        for (const r of landed) {
+          const confirmed = await confirmMint(config.chain, {
+            txHash: r.txHash,
+            contractAddress: config.contractAddress,
+            walletAddress: r.address,
+          }).catch((e) => ({ ok: false, pending: false, txHash: r.txHash, reason: e.message }));
+
+          const extras = await loadCardExtras(config.chain, {
+            slug: config.openseaSlug,
+            contractAddress: config.contractAddress,
+          }).catch(() => ({}));
+
+          mintSession.setLastResult(ctx.chat.id, confirmed);
+          await ctx.reply(
+            buildMintResultText({
+              result: confirmed,
+              chain: config.chain,
+              contractAddress: config.contractAddress,
+              stats: extras.stats,
+              ethUsd: extras.ethUsd,
+              listing: extras.listing,
+            }),
+            { parse_mode: "Markdown", ...mintResultKeyboard({ result: confirmed, stats: extras.stats }) }
+          );
+        }
+      }
     } catch (err) {
       await ctx.reply(`Mint failed: ${err.message}`);
     }
   };
+
+  // Lists the tokens this session just minted, priced off the floor.
+  //
+  // Only those token ids — never the wallet's whole balance. Sweeping up
+  // unrelated holdings because they share a contract is not something a mint
+  // confirmation should be able to do.
+  const listAtFloor = async (ctx, pct) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    const result = mintSession.getLastResult(ctx.chat.id);
+    if (!config || !result?.tokenIds?.length) return ctx.reply("Nothing to list — mint something first.");
+
+    const settings = loadMintExecutionSettings();
+    if (!settings.enabled) return ctx.reply("⛔️ Execution is disabled.");
+
+    const extras = await loadCardExtras(config.chain, { slug: config.openseaSlug, contractAddress: config.contractAddress });
+    // Refuse a non-positive floor outright. OpenSea reports 0 when nothing is
+    // listed, and pricing a sale off that would list the token for free — the
+    // one mistake here that cannot be undone once someone fills it.
+    const floor = extras.stats?.floorPriceEth;
+    if (floor == null || !(floor > 0)) {
+      return ctx.reply("No floor to price against yet — nothing has sold on the secondary market, so there is no price to match.");
+    }
+    const priceEth = Number((floor * (pct / 100)).toFixed(6));
+    if (!(priceEth > 0)) return ctx.reply("Refusing to list at zero.");
+
+    if (settings.dryRun) {
+      return ctx.reply(
+        `🧪 *Dry run* — would list ${result.tokenIds.map((i) => "#" + i).join(", ")} at *${priceEth} ETH* each. Nothing was listed.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    await ctx.reply(`Listing ${result.tokenIds.length} token(s) at ${priceEth} ETH…`);
+    for (const tokenId of result.tokenIds) {
+      try {
+        const r = await listNftForSale(config.chain, {
+          contractAddress: config.contractAddress,
+          tokenId,
+          priceEth,
+          collectionSlug: config.openseaSlug,
+        });
+        await ctx.reply(`🏷 Listed #${tokenId} at ${priceEth} ETH`, { parse_mode: "Markdown" });
+      } catch (err) {
+        await ctx.reply(`Couldn't list #${tokenId}: ${err.shortMessage || err.message}`);
+      }
+    }
+  };
+
+  bot.action("mint:sellfloor", (ctx) => listAtFloor(ctx, 100));
+  bot.action("mint:sellfloor:110", (ctx) => listAtFloor(ctx, 110));
 
   bot.action("mint:confirm", (ctx) => runMint(ctx));
 

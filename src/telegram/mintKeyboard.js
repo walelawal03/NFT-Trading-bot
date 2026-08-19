@@ -245,3 +245,69 @@ export function secondaryKeyboard(config) {
   rows.push([Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")]);
   return Markup.inlineKeyboard(rows);
 }
+
+/**
+ * What you own after a mint, what it is worth, and how to sell it.
+ *
+ * The floor is the only price signal available immediately after a mint —
+ * your specific token has no bid — so it is shown as an indication and
+ * labelled as one. A mint that cost gas and sits below floor is still a
+ * position worth seeing honestly rather than a number massaged upward.
+ */
+export function buildMintResultText({ result, chain, contractAddress, stats, ethUsd, listing }) {
+  if (result.pending) {
+    return [`⏳ *Mint sent, not yet confirmed*`, "", `\`${result.txHash}\``, "", result.reason].join("\n");
+  }
+  if (!result.ok) {
+    return [`❌ *Mint failed on-chain*`, "", `\`${result.txHash}\``, "", result.reason].join("\n");
+  }
+
+  // A floor of 0 is not a price — it is what OpenSea reports when nothing is
+  // listed. Treating it as one would price a sale at zero, which is giving
+  // the token away. Anything non-positive is "no floor".
+  const rawFloor = stats?.floorPriceEth ?? null;
+  const floor = rawFloor != null && rawFloor > 0 ? rawFloor : null;
+  const owned = result.balance ?? result.tokenIds.length;
+  const lines = [
+    `✅ *Minted ${result.tokenIds.length} × ${result.name || "NFT"}*`,
+    result.tokenIds.length ? `${result.tokenIds.map((id) => `#${id}`).join(", ")}` : "",
+    "",
+    `• You now hold: *${owned}*`,
+    `• Gas paid: ${eth(result.gasCostEth)} ETH${usdSuffix(result.gasCostEth, ethUsd)}`,
+  ];
+
+  if (floor != null) {
+    lines.push(
+      `• Floor: *${eth(floor)} ETH*${usdSuffix(floor, ethUsd)} each`,
+      `• Position at floor: *${eth(floor * owned)} ETH*${usdSuffix(floor * owned, ethUsd)}`
+    );
+  } else {
+    // No floor yet is the normal state for a drop that just minted, and
+    // saying so beats an empty space that looks like a missing feature.
+    lines.push("• No floor yet — nothing has resold on the secondary market");
+  }
+
+  if (listing?.priceEth != null) lines.push(`• Cheapest listing right now: ${eth(listing.priceEth)} ETH`);
+
+  lines.push("", `\`${result.txHash}\``);
+  return lines.filter((l) => l != null).join("\n");
+}
+
+/**
+ * Controls after a mint. Selling is offered only when there is a floor to
+ * price against — a "sell at floor" button on a collection with no floor
+ * would have to invent the number it sells at.
+ */
+export function mintResultKeyboard({ result, stats }) {
+  const rows = [];
+  // Same guard as the text: a zero floor cannot price a sale, so no sell
+  // button is offered rather than one that would list at nothing.
+  const raw = stats?.floorPriceEth ?? null;
+  const floor = raw != null && raw > 0 ? raw : null;
+  if (result.ok && floor != null && result.tokenIds?.length) {
+    rows.push([Markup.button.callback(`🏷 List all at floor (${eth(floor)} ETH)`, "mint:sellfloor")]);
+    rows.push([Markup.button.callback(`🏷 List at floor +10%`, "mint:sellfloor:110")]);
+  }
+  rows.push([Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")]);
+  return Markup.inlineKeyboard(rows);
+}

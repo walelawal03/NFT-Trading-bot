@@ -112,15 +112,18 @@ export async function handlePastedTarget(ctx, text) {
     const chain = { key: chainKey, ...CHAINS[chainKey] };
     try {
       const detect = await detectNftMint(chain, target.address, { budgetMs: 8000 });
-      await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
-        parse_mode: "Markdown",
-      });
 
-      // Only offer controls when there is something to control. A quantity
-      // stepper under a drop with no mint entrypoint invites tapping it.
+      // One message when there is something to mint: the drop's details sit
+      // directly above the controls that act on them, so nothing has to be
+      // scrolled back to before tapping. Only fall back to the standalone
+      // report when there are no controls to show.
       if (detect.mintVia) {
         const config = mintSession.startSession(ctx.chat.id, { chain, contractAddress: target.address, detect });
         await ctx.reply(buildMintConfigText(config), { parse_mode: "Markdown", ...mintConfigKeyboard(config) });
+      } else {
+        await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
+          parse_mode: "Markdown",
+        });
       }
     } catch (err) {
       await ctx.reply(`Couldn't read that contract on ${chain.label}: ${err.message}`);

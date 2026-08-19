@@ -2832,6 +2832,27 @@ export function createBot(stats, chainControls, digestControls) {
 
   bot.action("mint:noop", (ctx) => ctx.answerCbQuery());
 
+  // Re-reads the drop. Worth its own button because these change under you:
+  // a collection's advertised price and per-wallet cap were both observed
+  // changing within a day, and a stale card is how you mint at a price that
+  // no longer exists.
+  bot.action("mint:refresh", async (ctx) => {
+    await ctx.answerCbQuery("Re-reading…");
+    const current = mintSession.getSession(ctx.chat.id);
+    if (!current) return ctx.reply("That mint session expired — paste the address again.");
+    try {
+      const detect = await detectNftMint(current.chain, current.contractAddress, { budgetMs: 8000 });
+      const config = mintSession.startSession(ctx.chat.id, {
+        chain: current.chain,
+        contractAddress: current.contractAddress,
+        detect,
+      });
+      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config));
+    } catch (err) {
+      await ctx.reply(`Couldn't refresh: ${err.message}`);
+    }
+  });
+
   bot.action(/^mint:qty:(-?\d+|max)$/, async (ctx) => {
     await ctx.answerCbQuery();
     const arg = ctx.match[1];

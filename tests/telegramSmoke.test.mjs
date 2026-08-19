@@ -301,7 +301,7 @@ await t("the config text surfaces blockers above the buttons", async () => {
   const mintSession = await import("../src/mint/mintSession.js");
   const c = mintSession.getSession(CHAT);
   const text = buildMintConfigText({ ...c, detect: { ...c.detect, soldOut: true } });
-  assert.match(text, /Cannot mint:.*sold out/);
+  assert.match(text, /Can't mint:.*sold out/);
 });
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}

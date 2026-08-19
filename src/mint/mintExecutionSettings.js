@@ -15,6 +15,16 @@ const settingsPath = () => path.join(getDataDir(), "mintExecutionSettings.json")
 // across 20 wallets, not overpaying once.
 const DEFAULTS = {
   enabled: false,
+  // Two deliberate steps between here and a spent wallet, not one. Enabling
+  // execution turns the machinery on; clearing dryRun is what lets it
+  // broadcast. Default ON so that flipping "enabled" — the thing someone
+  // does while impatient — still cannot send a transaction.
+  //
+  // A dry run is not a partial run. It builds the real calldata, simulates
+  // from the real wallet and estimates real gas; it stops at the broadcast.
+  // So a green dry run means the next thing that happens is a send that
+  // works, which is the only assurance worth having before spending.
+  dryRun: true,
   maxSpendEthPerRun: 0.05,
   // Multiplier on the estimated gas limit. Mints commonly use more gas than a
   // cold estimate suggests (first write to a slot, allowlist checks), and an

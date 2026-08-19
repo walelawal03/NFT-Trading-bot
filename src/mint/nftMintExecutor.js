@@ -137,7 +137,8 @@ export async function simulateMint(chain, call, from) {
  *   2. nothing to mint / no wallets(local state, no network)
  *   3. spend ceiling               (arithmetic, no network)
  *   4. simulation                  (one eth_call, no gas)
- *   5. send                        (real money)
+ *   5. gas estimate                (no gas)
+ *   6. send                        (real money — skipped entirely on dryRun)
  *
  * Wallets are sent CONCURRENTLY. They are independent accounts with
  * independent nonces, and at a launch the difference between first and last
@@ -196,6 +197,11 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
           gasLimit = (estimate * BigInt(Math.round(settings.gasLimitMultiplier * 100))) / 100n;
         } catch (err) {
           return { address, ok: false, stage: "estimate", reason: err.shortMessage || err.message };
+        }
+
+        // Everything above this line is free. The next statement is not.
+        if (settings.dryRun) {
+          return { address, ok: true, stage: "dry-run", gasLimit, valueWei: call.value, to: call.to };
         }
 
         const tx = await wallet.sendTransaction({ ...call, gasLimit });

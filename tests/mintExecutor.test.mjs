@@ -81,6 +81,18 @@ await t("an unknown price refuses to build rather than assuming zero", () => {
   );
 });
 
+// Dry run must be the default, and enabling execution must NOT be enough to
+// broadcast. Two deliberate steps, not one.
+await t("dry run is on by default", async () => {
+  assert.equal(loadMintExecutionSettings().dryRun, true, "the safe mode must be the default one");
+});
+
+await t("enabling execution alone still cannot broadcast", async () => {
+  const st = loadMintExecutionSettings();
+  saveMintExecutionSettings({ ...st, enabled: true, dryRun: true });
+  assert.equal(loadMintExecutionSettings().dryRun, true, "enabling must not clear dryRun as a side effect");
+});
+
 // Scheduling
 await t("arming a future phase works and is listable", () => {
   const r = armMint({ chain: CHAIN, contractAddress: "0x" + "c".repeat(40), detect: detect(), quantity: 2, walletCount: 1, chatId: 1 });

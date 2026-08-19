@@ -1,5 +1,5 @@
 import { Telegraf, Markup } from "telegraf";
-import { Wallet } from "ethers";
+import { Wallet, formatEther} from "ethers";
 import { config } from "../config.js";
 import { CHAINS } from "../chains.js";
 import { getActiveChainDefs, isChainEnabled } from "../chainSettings.js";
@@ -2881,9 +2881,18 @@ export function createBot(stats, chainControls, digestControls) {
       }
       const sent = result.results.filter((r) => r.ok);
       const failed = result.results.filter((r) => !r.ok);
+      const dry = sent.some((r) => r.stage === "dry-run");
       const lines = [
-        sent.length ? `🚀 *Sent ${sent.length}/${result.results.length}*` : "⛔️ *Nothing sent*",
-        ...sent.map((r) => `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\``),
+        !sent.length
+          ? "⛔️ *Nothing sent*"
+          : dry
+            ? `🧪 *Dry run — ${sent.length}/${result.results.length} would succeed.* Nothing was broadcast.`
+            : `🚀 *Sent ${sent.length}/${result.results.length}*`,
+        ...sent.map((r) =>
+          r.stage === "dry-run"
+            ? `  ✅ \`${r.address.slice(0, 10)}…\` would send ${formatEther(r.valueWei)} ETH to \`${r.to.slice(0, 10)}…\` (gas ${r.gasLimit})`
+            : `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\``
+        ),
         ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
       ];
       await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
@@ -2944,7 +2953,8 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.reply(
       [
         "⚙️ *Mint execution*",
-        `• Enabled: *${st.enabled ? "YES — this bot can spend" : "no"}*`,
+        `• Enabled: *${st.enabled ? "yes" : "no"}*`,
+        `• Mode: *${st.dryRun ? "🧪 DRY RUN — builds and simulates, never sends" : "🔴 LIVE — will broadcast and spend"}*`,
         `• Max spend per run: ${st.maxSpendEthPerRun} ETH`,
         `• Gas limit multiplier: ${st.gasLimitMultiplier}`,
         `• Require simulation: ${st.requireSimulation}`,
@@ -2965,7 +2975,8 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.reply(
       [
         "⚙️ *Mint execution*",
-        `• Enabled: *${st.enabled ? "YES — this bot can spend" : "no"}*`,
+        `• Enabled: *${st.enabled ? "yes" : "no"}*`,
+        `• Mode: *${st.dryRun ? "🧪 DRY RUN — builds and simulates, never sends" : "🔴 LIVE — will broadcast and spend"}*`,
         `• Max spend per run: ${st.maxSpendEthPerRun} ETH`,
         `• Gas limit multiplier: ${st.gasLimitMultiplier}`,
         `• Require simulation: ${st.requireSimulation}`,
@@ -2973,7 +2984,8 @@ export function createBot(stats, chainControls, digestControls) {
       {
         parse_mode: "Markdown",
         ...Markup.inlineKeyboard([
-          [Markup.button.callback(st.enabled ? "🔴 Disable minting" : "🟢 Enable minting", "mintset:toggle")],
+          [Markup.button.callback(st.enabled ? "⚪️ Disable minting" : "🟢 Enable minting", "mintset:toggle")],
+          [Markup.button.callback(st.dryRun ? "🔴 Go LIVE (real spending)" : "🧪 Back to dry run", "mintset:dryrun")],
           [Markup.button.callback("🔙 Menu", "menu:home")],
         ]),
       }
@@ -2989,6 +3001,19 @@ export function createBot(stats, chainControls, digestControls) {
         `• \`${a.contractAddress}\` — ${a.quantity}x${a.walletCount} at ${a.startsAt.toISOString().slice(0, 19)}Z${a.prepared ? " (prepared)" : ""}`
     );
     await ctx.reply(list.length === 0 ? empty : rows.join("\n"), { parse_mode: "Markdown" });
+  });
+
+  bot.action("mintset:dryrun", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    const st = loadMintExecutionSettings();
+    st.dryRun = !st.dryRun;
+    saveMintExecutionSettings(st);
+    await ctx.reply(
+      st.dryRun
+        ? "🧪 Dry run ON. Mints build, simulate and estimate gas — nothing is broadcast."
+        : "🔴 LIVE. The next CONFIRM MINT will broadcast real transactions and spend real ETH.",
+    );
   });
 
   bot.action("mintset:toggle", async (ctx) => {

@@ -1,4 +1,6 @@
-import { Contract, Interface } from "ethers";
+import { Contract, Interface, Wallet, formatEther, parseEther } from "ethers";
+import { loadMintWalletSigningKeys } from "./mintWallets.js";
+import { loadMintExecutionSettings } from "./mintExecutionSettings.js";
 import { getProvider } from "../wallet.js";
 import { SEADROP_1_0 } from "./nftMintDetect.js";
 
@@ -119,4 +121,90 @@ export async function simulateMint(chain, call, from) {
     const reason = err.shortMessage || err.reason || err.message || "reverted";
     return { ok: false, reason };
   }
+}
+
+// ── Sending ───────────────────────────────────────────────────────────────
+// Everything above this line is read-only. Everything below spends ETH.
+
+
+/**
+ * Mints across the first `walletCount` wallets in the roster.
+ *
+ * Order of checks is deliberate — the cheapest and most certain refusals come
+ * first, so a misconfigured run costs nothing:
+ *
+ *   1. execution disabled          (a setting, no network)
+ *   2. nothing to mint / no wallets(local state, no network)
+ *   3. spend ceiling               (arithmetic, no network)
+ *   4. simulation                  (one eth_call, no gas)
+ *   5. send                        (real money)
+ *
+ * Wallets are sent CONCURRENTLY. They are independent accounts with
+ * independent nonces, and at a launch the difference between first and last
+ * is the difference between minting and not. One wallet failing must never
+ * hold up the others, so each result is captured rather than thrown.
+ */
+export async function executeMint(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount }) {
+  const settings = loadMintExecutionSettings();
+  if (!settings.enabled) {
+    return { ok: false, reason: "Mint execution is disabled. Turn it on in mint settings first.", results: [] };
+  }
+
+  const keys = loadMintWalletSigningKeys().slice(0, walletCount);
+  if (keys.length === 0) return { ok: false, reason: "No wallets imported.", results: [] };
+  if (!detect.mintVia) return { ok: false, reason: "No mint entrypoint on this contract.", results: [] };
+
+  // Ceiling first, from the unit price alone — no network. buildMintCall
+  // resolves the fee recipient over RPC, so building before checking made an
+  // unaffordable run cost a round trip to refuse, and on a slow chain that is
+  // seconds spent to say no. The arithmetic needs nothing but the price.
+  const unitPriceWei = priceOverrideWei ?? detect.phase?.priceWei ?? null;
+  if (unitPriceWei == null) {
+    return { ok: false, reason: "Unit price unknown — refusing to mint at an assumed price.", results: [] };
+  }
+  const totalWei = unitPriceWei * BigInt(quantity) * BigInt(keys.length);
+  const ceilingWei = parseEther(String(settings.maxSpendEthPerRun));
+  if (totalWei > ceilingWei) {
+    return {
+      ok: false,
+      reason: `Run would spend ${formatEther(totalWei)} ETH, over the ${settings.maxSpendEthPerRun} ETH ceiling.`,
+      results: [],
+    };
+  }
+
+  const call = await buildMintCall(chain, { detect, contractAddress, quantity, priceOverrideWei });
+
+  const provider = getProvider(chain);
+
+  const results = await Promise.all(
+    keys.map(async (privateKey) => {
+      const wallet = new Wallet(privateKey, provider);
+      const address = wallet.address;
+      try {
+        if (settings.requireSimulation) {
+          const sim = await simulateMint(chain, call, address);
+          // A simulated revert is the cheapest possible failure. Sending
+          // anyway burns gas to learn the same thing.
+          if (!sim.ok) return { address, ok: false, stage: "simulate", reason: sim.reason };
+        }
+
+        // Estimate per wallet rather than once: allowlist state and
+        // already-minted counts differ between them, and so does the gas.
+        let gasLimit;
+        try {
+          const estimate = await provider.estimateGas({ ...call, from: address });
+          gasLimit = (estimate * BigInt(Math.round(settings.gasLimitMultiplier * 100))) / 100n;
+        } catch (err) {
+          return { address, ok: false, stage: "estimate", reason: err.shortMessage || err.message };
+        }
+
+        const tx = await wallet.sendTransaction({ ...call, gasLimit });
+        return { address, ok: true, stage: "sent", txHash: tx.hash, valueWei: call.value };
+      } catch (err) {
+        return { address, ok: false, stage: "send", reason: err.shortMessage || err.message };
+      }
+    })
+  );
+
+  return { ok: results.some((r) => r.ok), reason: null, results, call };
 }

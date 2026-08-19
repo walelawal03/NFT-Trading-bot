@@ -20,6 +20,7 @@ import { startNftBuyRecheckQueue } from "./nftBuyRecheckQueue.js";
 import { startNftPaperTradeChecker } from "./nftPaperTrading.js";
 import { startNftRealTradeChecker } from "./nftRealTrading.js";
 import { startNftOutcomeTracker } from "./nftOutcomeTracker.js";
+import { startMintScheduler } from "./mint/mintScheduler.js";
 import { getNftChainDefs } from "./nftChains.js";
 
 // Last line of defense: an async failure anywhere that isn't already
@@ -129,6 +130,17 @@ const chainControls = {
 const digestControls = { sendNow: async () => {}, reschedule: () => {} };
 
 const bot = createBot(stats, chainControls, digestControls);
+
+// Armed mints fire on their own clock, independent of the collection
+// watchers — scheduling is the one path where speed is winnable, so it must
+// not sit behind anything that polls an aggregator.
+startMintScheduler({
+  notify: async (chatId, message) => {
+    await bot.telegram.sendMessage(chatId, message, { parse_mode: "Markdown" }).catch((e) =>
+      console.error("[mintScheduler] notify failed:", e.message)
+    );
+  },
+});
 
 // This is the NFT mint underwriter. It is a SEPARATE BOT from the token
 // trading bot, and nothing token-related starts here.

@@ -78,6 +78,9 @@ import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget } from "./handlePaste.js";
+import { executeMint } from "../mint/nftMintExecutor.js";
+import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
+import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
@@ -2860,31 +2863,123 @@ export function createBot(stats, chainControls, digestControls) {
     await redrawMint(ctx, config);
   });
 
-  // Execution is not built. These refuse plainly rather than doing nothing,
-  // showing a spinner, or — worst — implying a transaction went out. A mint
-  // button that quietly does nothing is indistinguishable from one that
-  // failed silently, and this bot has no signing path at all yet.
-  const notArmed = (what) => async (ctx) => {
+  // Runs the configured mint. executeMint refuses on its own for anything
+  // structural (disabled, no wallets, over the ceiling, simulated revert) —
+  // this only reports what happened.
+  const runMint = async (ctx, { sweep }) => {
     await ctx.answerCbQuery();
-    const wallets = countMintWallets();
-    await ctx.reply(
-      [
-        `⛔️ *${what} is not wired up yet.*`,
-        "",
-        "Detection and configuration are live; signing is not. This bot holds no",
-        "private key, so nothing here can send a transaction.",
-        "",
-        `Wallets loaded: ${wallets}`,
-        "Next step is the executor — and that is the part that spends real ETH,",
-        "so it gets built deliberately rather than quietly.",
-      ].join("\n"),
-      { parse_mode: "Markdown" }
-    );
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+
+    const quantity = sweep ? (config.detect.phase?.maxPerWallet ?? config.quantity) : config.quantity;
+    const walletCount = Math.max(config.wallets, 1);
+
+    await ctx.reply(`Sending ${quantity} x ${walletCount} wallet(s)…`);
+    try {
+      const result = await executeMint(config.chain, {
+        detect: config.detect,
+        contractAddress: config.contractAddress,
+        quantity,
+        priceOverrideWei: config.priceOverrideWei,
+        walletCount,
+      });
+
+      if (!result.ok && result.results.length === 0) {
+        return ctx.reply(`⛔️ ${result.reason}`);
+      }
+      const sent = result.results.filter((r) => r.ok);
+      const failed = result.results.filter((r) => !r.ok);
+      const lines = [
+        sent.length ? `🚀 *Sent ${sent.length}/${result.results.length}*` : "⛔️ *Nothing sent*",
+        ...sent.map((r) => `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\``),
+        ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
+      ];
+      await ctx.reply(lines.join(
+), { parse_mode: "Markdown" });
+    } catch (err) {
+      await ctx.reply(`Mint failed: ${err.message}`);
+    }
   };
 
-  bot.action("mint:confirm", notArmed("CONFIRM MINT"));
-  bot.action("mint:sweep", notArmed("SWEEP MINT"));
-  bot.action("mint:schedule", notArmed("Scheduled auto-mint"));
+  bot.action("mint:confirm", (ctx) => runMint(ctx, { sweep: false }));
+  bot.action("mint:sweep", (ctx) => runMint(ctx, { sweep: true }));
+
+  bot.action("mint:schedule", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+
+    const res = armMint({
+      chain: config.chain,
+      contractAddress: config.contractAddress,
+      detect: config.detect,
+      quantity: config.quantity,
+      walletCount: Math.max(config.wallets, 1),
+      priceOverrideWei: config.priceOverrideWei,
+      chatId: ctx.chat.id,
+    });
+    if (!res.ok) return ctx.reply(`⛔️ ${res.reason}`);
+    await ctx.reply(
+      [
+        `⏰ *Armed* — ${config.detect.name || config.contractAddress}`,
+        `Fires at ${res.startsAt.toISOString().replace("T", " ").slice(0, 19)} UTC`,
+        `${config.quantity} per wallet across ${Math.max(config.wallets, 1)} wallet(s)`,
+        "",
+        "Calldata is built 90s before the open, so firing is a send and nothing else.",
+      ].join(
+),
+      { parse_mode: "Markdown" }
+    );
+  });
+
+  bot.command("armed", async (ctx) => {
+    const list = listArmedMints();
+    if (list.length === 0) return ctx.reply("Nothing armed.");
+    await ctx.reply(
+      list.map((a) => `• \`${a.contractAddress}\` — ${a.quantity}x${a.walletCount} at ${a.startsAt.toISOString().slice(0, 19)}Z${a.prepared ? " (prepared)" : ""}`).join(
+),
+      { parse_mode: "Markdown" }
+    );
+  });
+
+  bot.command("disarm", async (ctx) => {
+    const m = ctx.message.text.match(/0x[a-fA-F0-9]{40}/);
+    if (!m) return ctx.reply("Usage: /disarm <contractAddress>");
+    const gone = getNftChainKeys().some((k) => disarmMint(k, m[0]));
+    await ctx.reply(gone ? "Disarmed." : "Nothing armed for that address.");
+  });
+
+  bot.command("mintsettings", async (ctx) => {
+    if (!isAdmin(ctx)) return;
+    const st = loadMintExecutionSettings();
+    await ctx.reply(
+      [
+        "⚙️ *Mint execution*",
+        `• Enabled: *${st.enabled ? "YES — this bot can spend" : "no"}*`,
+        `• Max spend per run: ${st.maxSpendEthPerRun} ETH`,
+        `• Gas limit multiplier: ${st.gasLimitMultiplier}`,
+        `• Require simulation: ${st.requireSimulation}`,
+      ].join(
+),
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(st.enabled ? "🔴 Disable minting" : "🟢 Enable minting", "mintset:toggle")],
+        ]),
+      }
+    );
+  });
+
+  bot.action("mintset:toggle", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    const st = loadMintExecutionSettings();
+    st.enabled = !st.enabled;
+    saveMintExecutionSettings(st);
+    await ctx.reply(st.enabled
+      ? "🟢 Mint execution ENABLED. This bot can now spend from the imported wallets."
+      : "🔴 Mint execution disabled.");
+  });
 
   bot.action("mint:eligibility", async (ctx) => {
     await ctx.answerCbQuery();

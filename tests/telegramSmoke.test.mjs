@@ -284,11 +284,16 @@ await t("a price override can never go negative", async () => {
   assert.ok(mintSession.getSession(CHAT).priceOverrideWei >= 0n);
 });
 
-await t("CONFIRM MINT refuses out loud instead of pretending", async () => {
+// CONFIRM is wired to the executor now. With execution disabled — the
+// default — it must refuse and must never imply a transaction went out.
+await t("CONFIRM MINT refuses while execution is disabled, and says so", async () => {
+  const { loadMintExecutionSettings, saveMintExecutionSettings } = await import("../src/mint/mintExecutionSettings.js");
+  saveMintExecutionSettings({ ...loadMintExecutionSettings(), enabled: false });
+
   const out = texts(await tap("mint:confirm"));
-  assert.match(out, /not wired up yet/i);
-  assert.match(out, /holds no/i, "must say why it cannot send");
-  assert.ok(!/sent|submitted|broadcast/i.test(out), "must not imply a transaction went out");
+  assert.match(out, /disabled/i, "must name the reason");
+  assert.ok(!/(sent|submitted|broadcast|0x[a-f0-9]{64})/i.test(out), `must not imply a send:
+${out}`);
 });
 
 await t("the config text surfaces blockers above the buttons", async () => {

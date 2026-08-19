@@ -73,7 +73,7 @@ const iface = new Interface(nftRoundTripProbeAbi);
  * nftDangerousFunctions.js. A drop we could not probe is a drop we know
  * nothing about, not a drop that passed.
  */
-export async function probeNftRoundTrip(chain, { mintCall, contractAddress, budgetMs = 12000 } = {}) {
+export async function probeNftRoundTrip(chain, { mintCall, contractAddress, budgetMs = 12000, atTimestamp = null } = {}) {
   const unknown = (reason) => ({
     checked: false,
     exitable: null,
@@ -105,20 +105,28 @@ export async function probeNftRoundTrip(chain, { mintCall, contractAddress, budg
     // the provider's own retry backoff unbounded, so a 12s ceiling silently
     // becomes a minute against a fast-failing endpoint — the trap already
     // fixed in nftDangerousFunctions.js.
+    const params = [
+      // `from` is the probe itself, which is the point: inside the mint,
+      // msg.sender and tx.origin are then the same address, so the
+      // `require(msg.sender == tx.origin)` anti-bot check that a good number
+      // of drops carry passes instead of failing the probe for a reason
+      // that has nothing to do with exitability.
+      { from: PROBE_ADDRESS, to: PROBE_ADDRESS, data },
+      "latest",
+      {
+        [PROBE_ADDRESS]: { code: nftRoundTripProbeBytecode, balance: "0x" + balance.toString(16) },
+        [OPERATOR_ADDRESS]: { code: nftRoundTripProbeBytecode },
+      },
+    ];
+    // Simulating past a drop's start time is what lets this answer for a mint
+    // that has not opened — otherwise every scheduled drop reports
+    // MINT_FAILED, which is exactly the case where knowing early is worth
+    // most. A geth extension, verified honoured on both Robinhood endpoints
+    // by behaviour rather than by the absence of an error.
+    if (atTimestamp != null) params.push({ time: "0x" + BigInt(atTimestamp).toString(16) });
+
     raw = await Promise.race([
-      provider.send("eth_call", [
-        // `from` is the probe itself, which is the point: inside the mint,
-        // msg.sender and tx.origin are then the same address, so the
-        // `require(msg.sender == tx.origin)` anti-bot check that a good number
-        // of drops carry passes instead of failing the probe for a reason
-        // that has nothing to do with exitability.
-        { from: PROBE_ADDRESS, to: PROBE_ADDRESS, data },
-        "latest",
-        {
-          [PROBE_ADDRESS]: { code: nftRoundTripProbeBytecode, balance: "0x" + balance.toString(16) },
-          [OPERATOR_ADDRESS]: { code: nftRoundTripProbeBytecode },
-        },
-      ]),
+      provider.send("eth_call", params),
       new Promise((_, reject) => setTimeout(() => reject(new Error(`probe budget ${budgetMs}ms exceeded`)), budgetMs)),
     ]);
   } catch (err) {

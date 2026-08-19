@@ -11,3 +11,6 @@ data/mintWallets.json
 # Runtime holdings record. Machine-local state, and it maps burner addresses
 # to what they hold — the same reason mintWallets.json is not tracked.
 data/nftHoldings.json
+
+# Armed mints. Machine-local runtime state, like nftHoldings.json.
+data/armedMints.json

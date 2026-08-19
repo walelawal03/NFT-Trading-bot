@@ -108,9 +108,34 @@ export async function buildMintCall(chain, { detect, contractAddress, quantity, 
  * failed transaction, and at a launch it also costs the allocation. Every
  * mint should pass through here first.
  */
-export async function simulateMint(chain, call, from) {
+export async function simulateMint(chain, call, from, { atTimestamp = null } = {}) {
   const provider = getProvider(chain);
   try {
+    if (atTimestamp != null) {
+      // Simulate at a future block time.
+      //
+      // Not an optimisation — it is the only way to validate a mint that has
+      // not opened yet, and without it the whole scheduled-mint path was dead:
+      // prepare() runs 90s before the open, both the simulation and the gas
+      // estimate reverted on the drop's own `startTime <= block.timestamp`
+      // check, so nothing was ever prepared and fire() always refused. That
+      // was not a rare edge — it was every armed mint, and it is why a real
+      // scheduled mint had never once fired.
+      //
+      // eth_call's 4th parameter is a geth extension rather than a standard,
+      // so a node may accept and ignore it, or reject it outright. Verified
+      // honoured on both Robinhood endpoints 2026-08-19 with bytecode that
+      // reverts below a timestamp gate — accepting the parameter is not the
+      // same as applying it, so it was tested by behaviour, not by the
+      // absence of an error.
+      await provider.send("eth_call", [
+        { to: call.to, data: call.data, value: "0x" + BigInt(call.value ?? 0n).toString(16), from },
+        "latest",
+        {},
+        { time: "0x" + BigInt(atTimestamp).toString(16) },
+      ]);
+      return { ok: true, reason: null, simulatedAt: atTimestamp };
+    }
     await provider.call({ to: call.to, data: call.data, value: call.value, from });
     return { ok: true, reason: null };
   } catch (err) {
@@ -336,7 +361,34 @@ export async function findMaxMintable(chain, { detect, contractAddress, priceOve
  *           when the base fee spikes. Underpriced is worse than overpaid: it
  *           sits unmined while the drop fills.
  */
-export async function prepareSignedMints(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, feeMultiplier = 2 }) {
+/**
+ * Gas estimate for a call, optionally at a future block time.
+ *
+ * The timestamp override matters for exactly the same reason it does in
+ * simulateMint: estimating a mint that has not opened yet reverts on the
+ * drop's own start-time check. Falls back to a plain estimate when a node
+ * refuses the override, so a chain without the extension degrades to the old
+ * behaviour rather than losing gas estimation entirely.
+ */
+async function estimateGasAt(provider, call, from, atTimestamp) {
+  if (atTimestamp != null) {
+    try {
+      const hex = await provider.send("eth_estimateGas", [
+        { to: call.to, data: call.data, value: "0x" + BigInt(call.value ?? 0n).toString(16), from },
+        "latest",
+        {},
+        { time: "0x" + BigInt(atTimestamp).toString(16) },
+      ]);
+      return BigInt(hex);
+    } catch {
+      // Fall through to the plain estimate below, which will most likely
+      // revert too — but its revert reason is the useful one to report.
+    }
+  }
+  return provider.estimateGas({ ...call, from });
+}
+
+export async function prepareSignedMints(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, feeMultiplier = 2, atTimestamp = null }) {
   const settings = loadMintExecutionSettings();
   if (!settings.enabled) return { ok: false, reason: "Mint execution is disabled.", signed: [] };
 
@@ -365,12 +417,12 @@ export async function prepareSignedMints(chain, { detect, contractAddress, quant
       const address = wallet.address;
       try {
         if (settings.requireSimulation) {
-          const sim = await simulateMint(chain, call, address);
+          const sim = await simulateMint(chain, call, address, { atTimestamp });
           if (!sim.ok) return { address, ok: false, stage: "simulate", reason: sim.reason };
         }
         const [nonce, estimate] = await Promise.all([
           provider.getTransactionCount(address, "pending"),
-          provider.estimateGas({ ...call, from: address }),
+          estimateGasAt(provider, call, address, atTimestamp),
         ]);
         const gasLimit = (estimate * BigInt(Math.round(settings.gasLimitMultiplier * 100))) / 100n;
 

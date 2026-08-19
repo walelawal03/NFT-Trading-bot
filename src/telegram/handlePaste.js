@@ -96,7 +96,13 @@ export async function loadRoundTrip(chain, { detect, contractAddress }) {
     // question is whether a token from this collection can leave a wallet at
     // all, and that does not change with quantity.
     const mintCall = await buildMintCall(chain, { detect, contractAddress, quantity: 1 });
-    return await probeNftRoundTrip(chain, { mintCall, contractAddress });
+    // A drop that has not opened yet reverts on its own start-time check, so
+    // the probe would report MINT_FAILED and tell you nothing about whether
+    // the token can ever leave your wallet — on precisely the drops worth
+    // arming. Simulating just past the open answers the real question early.
+    const startsAt = detect.phase?.startsAt?.getTime?.() ?? null;
+    const atTimestamp = startsAt && startsAt > Date.now() ? Math.floor(startsAt / 1000) + 5 : null;
+    return await probeNftRoundTrip(chain, { mintCall, contractAddress, atTimestamp });
   } catch {
     return null;
   }

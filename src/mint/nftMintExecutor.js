@@ -1,5 +1,5 @@
 import { Contract, Interface, Wallet, formatEther, parseEther } from "ethers";
-import { loadMintWalletSigningKeys } from "./mintWallets.js";
+import { loadMintWalletSigningKeys, listMintWallets } from "./mintWallets.js";
 import { loadMintExecutionSettings } from "./mintExecutionSettings.js";
 import { getProvider } from "../wallet.js";
 import { SEADROP_1_0 } from "./nftMintDetect.js";
@@ -386,6 +386,61 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
           return { address: s.address, ok: false, stage: "resign", reason: err2.shortMessage || err2.message };
         }
       }
+    })
+  );
+}
+
+/**
+ * Per-wallet readiness for a specific drop.
+ *
+ * Answers the four things that actually decide whether a wallet mints, in the
+ * order they bite:
+ *
+ *   balance      — an empty wallet fails at simulation, which reads as
+ *                  "reverted" and sends you hunting for a contract problem
+ *                  that isn't there. This is by far the most common cause.
+ *   already      — SeaDrop's getMintStats reports what this address has
+ *                  already taken, so the remaining allowance is knowable
+ *                  without guessing.
+ *   simulation   — the only thing that catches per-wallet rules nothing
+ *                  publishes: allowlists, denylists, caps the contract
+ *                  advertises but will not honour.
+ *
+ * Read-only. No transaction, no gas, and it works before minting is enabled.
+ */
+export async function checkWalletEligibility(chain, { detect, contractAddress, quantity }) {
+  const provider = getProvider(chain);
+  const wallets = listMintWallets();
+  const unitPriceWei = detect.phase?.priceWei ?? null;
+
+  const STATS_ABI = ["function getMintStats(address) view returns (uint256 minterNumMinted, uint256 currentTotalSupply, uint256 maxSupply)"];
+  const stats = detect.standard === "seadrop" ? new Contract(contractAddress, STATS_ABI, provider) : null;
+
+  return Promise.all(
+    wallets.map(async (w) => {
+      const [balance, minted] = await Promise.all([
+        provider.getBalance(w.address).catch(() => null),
+        stats ? stats.getMintStats(w.address).then((s) => Number(s[0])).catch(() => null) : Promise.resolve(null),
+      ]);
+
+      const cap = detect.phase?.maxPerWallet ?? null;
+      const remaining = cap != null && minted != null ? Math.max(0, cap - minted) : null;
+
+      let sim = { ok: null, reason: null };
+      try {
+        const call = await buildMintCall(chain, { detect, contractAddress, quantity });
+        sim = await simulateMint(chain, call, w.address);
+      } catch (err) {
+        sim = { ok: false, reason: err.shortMessage || err.message };
+      }
+
+      // Cost is the mint value only. Gas is separate and tiny by comparison,
+      // but a wallet holding exactly the mint price still fails, so the
+      // comparison is deliberately "more than", not "at least".
+      const needWei = unitPriceWei != null ? unitPriceWei * BigInt(quantity) : null;
+      const funded = balance != null && needWei != null ? balance > needWei : balance != null ? balance > 0n : null;
+
+      return { address: w.address, balance, minted, remaining, funded, ok: sim.ok, reason: sim.reason };
     })
   );
 }

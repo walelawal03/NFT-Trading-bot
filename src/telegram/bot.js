@@ -78,7 +78,7 @@ import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget } from "./handlePaste.js";
-import { executeMint, findMaxMintable } from "../mint/nftMintExecutor.js";
+import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
@@ -2762,8 +2762,27 @@ export function createBot(stats, chainControls, digestControls) {
   // ── Mint wallets ──────────────────────────────────────────────────────
   // Keys are IMPORTED, never generated. A bot that mints its own keys decides
   // how much of your money lives somewhere you did not choose.
-  const renderMintWallets = () => {
+  // Balances are shown because an unfunded wallet is the single most common
+  // reason a mint fails, and it surfaces as a simulation revert — which reads
+  // like a contract problem and sends you looking in the wrong place. Both
+  // chains, because a wallet funded on Base mints nothing on Robinhood.
+  const renderMintWallets = async () => {
     const wallets = listMintWallets();
+    const balances = new Map();
+    await Promise.all(
+      wallets.flatMap((w) =>
+        getNftChainKeys().map(async (key) => {
+          const bal = await getProvider({ key, ...CHAINS[key] })
+            .getBalance(w.address)
+            .catch(() => null);
+          balances.set(`${w.address}:${key}`, bal);
+        })
+      )
+    );
+    return renderMintWalletsWith(wallets, balances);
+  };
+
+  const renderMintWalletsWith = (wallets, balances) => {
     if (wallets.length === 0) {
       return [
         "💼 *Mint wallets*",
@@ -2774,10 +2793,21 @@ export function createBot(stats, chainControls, digestControls) {
         "plaintext on this machine, the same trust boundary as the trading wallet.",
       ].join("\n");
     }
+    const fmtBal = (w) =>
+      getNftChainKeys()
+        .map((key) => {
+          const bal = balances.get(`${w.address}:${key}`);
+          return `${key} ${bal == null ? "?" : Number(formatEther(bal)).toFixed(5)}`;
+        })
+        .join(" · ");
+
     return [
       `💼 *Mint wallets* (${wallets.length})`,
       "",
-      ...wallets.map((w, i) => `${i + 1}. \`${w.address}\``),
+      ...wallets.flatMap((w, i) => [
+        `${i + 1}. \`${w.address}\``,
+        `   ${fmtBal(w)}`,
+      ]),
       "",
       "_Keys are stored in plaintext on this machine. Fund these with mint money only._",
     ].join("\n");
@@ -2792,13 +2822,13 @@ export function createBot(stats, chainControls, digestControls) {
 
   bot.command("mintwallets", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("Not authorized.");
-    await ctx.reply(renderMintWallets(), { parse_mode: "Markdown", ...mintWalletsKeyboard() });
+    await ctx.reply(await renderMintWallets(), { parse_mode: "Markdown", ...mintWalletsKeyboard() });
   });
 
   bot.action("menu:mintwallets", async (ctx) => {
     await ctx.answerCbQuery();
     if (!isAdmin(ctx)) return;
-    await safeEdit(ctx, renderMintWallets(), mintWalletsKeyboard());
+    await safeEdit(ctx, await renderMintWallets(), mintWalletsKeyboard());
   });
 
   bot.action("mintwallet:import", async (ctx) => {
@@ -3118,14 +3148,37 @@ export function createBot(stats, chainControls, digestControls) {
     await ctx.answerCbQuery();
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — run /mint again.");
-    const wallets = listMintWallets();
-    if (wallets.length === 0) {
-      return ctx.reply(
-        "No wallets loaded. Add addresses to `data/mintWallets.json` as `{ \"wallets\": [\"0x…\"] }` to check eligibility.",
-        { parse_mode: "Markdown" }
-      );
+    if (countMintWallets() === 0) {
+      return ctx.reply("No wallets imported. Use 💼 Mint wallets → Import private key(s).");
     }
-    await ctx.reply(`Eligibility checking is not wired up yet — ${wallets.length} wallet(s) loaded.`);
+
+    await ctx.reply("🔍 Checking each wallet…");
+    try {
+      const rows = await checkWalletEligibility(config.chain, {
+        detect: config.detect,
+        contractAddress: config.contractAddress,
+        quantity: config.quantity,
+      });
+
+      const lines = [`🔍 *Eligibility — ${config.quantity} per wallet*`, ""];
+      for (const r of rows) {
+        const bal = r.balance == null ? "?" : `${Number(formatEther(r.balance)).toFixed(5)} ETH`;
+        const allowance = r.remaining == null ? "" : ` · ${r.remaining} left of cap`;
+        const minted = r.minted == null ? "" : ` · minted ${r.minted}`;
+        lines.push(
+          `${r.ok ? "✅" : "❌"} \`${r.address.slice(0, 10)}…\``,
+          `   ${bal}${minted}${allowance}`,
+          // A failing simulation is only useful with its reason attached —
+          // "insufficient funds" and "exceeds max per wallet" need opposite
+          // responses, and both look identical as a bare ❌.
+          ...(r.ok ? [] : [`   ↳ ${String(r.reason || "would revert").slice(0, 90)}`]),
+          ...(r.funded === false ? ["   ⚠️ balance may not cover the mint"] : [])
+        );
+      }
+      await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+    } catch (err) {
+      await ctx.reply(`Eligibility check failed: ${err.message}`);
+    }
   });
 
   bot.action(/^nftfiltertoggle:(.+)$/, async (ctx) => {

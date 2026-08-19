@@ -2879,35 +2879,13 @@ export function createBot(stats, chainControls, digestControls) {
   // Runs the configured mint. executeMint refuses on its own for anything
   // structural (disabled, no wallets, over the ceiling, simulated revert) —
   // this only reports what happened.
-  const runMint = async (ctx, { sweep }) => {
+  const runMint = async (ctx, { quantity: override } = {}) => {
     await ctx.answerCbQuery();
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — paste the address again.");
 
     const walletCount = Math.max(config.wallets, 1);
-
-    // SWEEP means the most that actually mints, not the most advertised.
-    // getPublicDrop's cap has been observed to be unmintable (KITTIHOOD:
-    // claims 6, reverts at 6, fine at 5), so sweep probes for the real
-    // ceiling instead of walking into that revert.
-    let quantity = config.quantity;
-    if (sweep) {
-      const wallets = listMintWallets();
-      if (wallets.length === 0) return ctx.reply("No wallets imported.");
-      await ctx.reply("Finding the largest quantity that actually mints…");
-      quantity = await findMaxMintable(config.chain, {
-        detect: config.detect,
-        contractAddress: config.contractAddress,
-        priceOverrideWei: config.priceOverrideWei,
-        from: wallets[0].address,
-        maxQuantity: config.detect.phase?.maxPerWallet ?? config.quantity,
-      });
-      if (quantity === 0) return ctx.reply("⛔️ Nothing mintable from this wallet right now — even a quantity of 1 reverts.");
-      const advertised = config.detect.phase?.maxPerWallet;
-      if (advertised && quantity < advertised) {
-        await ctx.reply(`ℹ️ Contract advertises ${advertised} per wallet but only ${quantity} actually mints. Using ${quantity}.`);
-      }
-    }
+    const quantity = override ?? config.quantity;
 
     await ctx.reply(`Sending ${quantity} x ${walletCount} wallet(s)…`);
     try {
@@ -2944,8 +2922,74 @@ export function createBot(stats, chainControls, digestControls) {
     }
   };
 
-  bot.action("mint:confirm", (ctx) => runMint(ctx, { sweep: false }));
-  bot.action("mint:sweep", (ctx) => runMint(ctx, { sweep: true }));
+  bot.action("mint:confirm", (ctx) => runMint(ctx));
+
+  // SWEEP probes for the largest quantity that ACTUALLY mints, then asks how
+  // much of it you want — it does not decide for you.
+  //
+  // The probe matters because the advertised cap has been observed to be
+  // unmintable: KITTIHOOD's getPublicDrop claimed 6, reverted at 6, and was
+  // fine at 5. Sweeping to the advertised number walks straight into a revert
+  // at the moment the button exists to avoid waste.
+  bot.action("mint:sweep", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+
+    const wallets = listMintWallets();
+    if (wallets.length === 0) return ctx.reply("No wallets imported.");
+
+    await ctx.reply("🧹 Probing for the largest quantity that actually mints…");
+    const advertised = config.detect.phase?.maxPerWallet ?? config.quantity;
+    let realMax;
+    try {
+      realMax = await findMaxMintable(config.chain, {
+        detect: config.detect,
+        contractAddress: config.contractAddress,
+        priceOverrideWei: config.priceOverrideWei,
+        from: wallets[0].address,
+        maxQuantity: advertised,
+      });
+    } catch (err) {
+      return ctx.reply(`Couldn't probe: ${err.message}`);
+    }
+    if (realMax === 0) {
+      return ctx.reply("⛔️ Nothing mintable from this wallet right now — even a quantity of 1 reverts.");
+    }
+
+    // A handful of choices rather than a stepper: sweeping is a decision you
+    // make once, and tapping "−" eleven times to get from 12 to 1 is not a
+    // decision, it is a chore. Deduped and ascending so the options never
+    // repeat on a small cap.
+    const walletCount = Math.max(config.wallets, 1);
+    const choices = [...new Set([1, Math.ceil(realMax / 4), Math.ceil(realMax / 2), Math.ceil((realMax * 3) / 4), realMax])]
+      .filter((n) => n >= 1 && n <= realMax)
+      .sort((a, b) => a - b);
+
+    const unit = config.priceOverrideWei ?? config.detect.phase?.priceWei ?? null;
+    const costOf = (q) => (unit == null ? "?" : `${Number(formatEther(unit * BigInt(q) * BigInt(walletCount)))} ETH`);
+
+    await ctx.reply(
+      [
+        `🧹 *Sweep — how many per wallet?*`,
+        "",
+        advertised && realMax < advertised
+          ? `Contract advertises *${advertised}*, but only *${realMax}* actually mints.`
+          : `Largest that mints: *${realMax}* per wallet.`,
+        `Across ${walletCount} wallet${walletCount === 1 ? "" : "s"}.`,
+      ].join("\n"),
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          choices.map((q) => Markup.button.callback(`${q}${q === realMax ? " (max)" : ""}`, `mint:sweepqty:${q}`)),
+          choices.map((q) => Markup.button.callback(costOf(q), "mint:noop")),
+          [Markup.button.callback("🔙 Back", "mint:refresh")],
+        ]),
+      }
+    );
+  });
+
+  bot.action(/^mint:sweepqty:(\d+)$/, (ctx) => runMint(ctx, { quantity: Number(ctx.match[1]) }));
 
   bot.action("mint:schedule", async (ctx) => {
     await ctx.answerCbQuery();

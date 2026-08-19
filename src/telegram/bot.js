@@ -2815,8 +2815,10 @@ export function createBot(stats, chainControls, digestControls) {
 
   const mintWalletsKeyboard = () =>
     Markup.inlineKeyboard([
+      [Markup.button.callback("🆕 Generate a wallet", "mintwallet:generate")],
       [Markup.button.callback("➕ Import private key(s)", "mintwallet:import")],
       ...(countMintWallets() > 0 ? [[Markup.button.callback("🗑 Remove one", "mintwallet:removeprompt")]] : []),
+      [Markup.button.callback("🔄 Refresh balances", "menu:mintwallets")],
       [Markup.button.callback("🔙 Menu", "menu:home")],
     ]);
 
@@ -2843,6 +2845,50 @@ export function createBot(stats, chainControls, digestControls) {
         "Fund these with what a mint costs. Not a main wallet.",
       ].join("\n")
     );
+  });
+
+  // Generating a wallet is offered, not hidden behind a CLI script — but the
+  // key is always shown once so it is yours, not only the bot's. Same
+  // self-deleting pattern the trading side already uses: long enough to save
+  // it, short enough not to sit in chat history forever.
+  //
+  // The roster file is still the only copy after that message goes. That is
+  // stated every time rather than once, because the failure is silent until
+  // the day it matters.
+  bot.action("mintwallet:generate", async (ctx) => {
+    await ctx.answerCbQuery("Generating…");
+    if (!isAdmin(ctx)) return;
+
+    const wallet = Wallet.createRandom();
+    const results = importMintWallets(wallet.privateKey);
+    if (!results[0]?.ok) return ctx.reply(`Couldn't add it: ${results[0]?.reason}`);
+
+    await ctx.reply(
+      [
+        "🆕 *New mint wallet*",
+        "",
+        `\`${wallet.address}\``,
+        "",
+        "Send it a little ETH on the chain you mint on — gas is tiny (a 5-mint",
+        "measured ~0.000003 ETH), so a small amount lasts a long time.",
+        "",
+        `Roster now holds ${countMintWallets()} wallet(s).`,
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+
+    const keyMsg = await ctx.reply(
+      [
+        "🔐 *Private key — save it now.*",
+        "This message deletes itself in 90 seconds.",
+        "",
+        `\`${wallet.privateKey}\``,
+        "",
+        "After it goes, `data/mintWallets.json` on your machine is the only copy.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    setTimeout(() => ctx.deleteMessage(keyMsg.message_id).catch(() => {}), 90_000);
   });
 
   bot.action("mintwallet:removeprompt", async (ctx) => {

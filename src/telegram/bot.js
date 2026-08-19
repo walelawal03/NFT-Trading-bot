@@ -428,37 +428,20 @@ async function requireRealTradingUnlock(ctx) {
 }
 
 function mainMenuKeyboard() {
-  const paused = isPaused();
-  const tokenRealEnabled = isAnyRealChainEnabled(loadRealTradingSettings());
-  const nftRealEnabled = config.openseaApiKey ? loadNftRealTradingSettings().enabled : false;
+  const exec = loadMintExecutionSettings();
+  const wallets = countMintWallets();
+  // Mint-bot navigation only. The token-trading menus this repo was seeded
+  // from are gone from here: they belong to a different bot, and leaving
+  // them on the home screen invites using them.
   return Markup.inlineKeyboard([
-    [Markup.button.callback(paused ? "▶️ Bot: OFF (tap to turn on)" : "⏸ Bot: ON (tap to turn off)", "menu:toggleBot")],
-    [Markup.button.callback("📊 Status", "menu:status"), Markup.button.callback("📋 Tracklist", "menu:tracklist")],
-    [Markup.button.callback("📜 Watchlist", "menu:watchlist"), Markup.button.callback("⚙️ Filter", "menu:filter")],
-    [Markup.button.callback("🔍 Score Token", "menu:score"), Markup.button.callback("📌 Track Token", "menu:track")],
-    [Markup.button.callback("🗑 Untrack Token", "menu:untrack"), Markup.button.callback("⛓ Chains", "menu:chains")],
-    [Markup.button.callback("📈 Paper Trading", "menu:papertrading")],
-    // Separate, individually-labeled real-trading entry points for tokens
-    // vs NFTs — each still opens its own submenu where the actual
-    // enable/pause action lives (passcode-locked, confirm-before-enabling),
-    // this just makes each asset class's live/off status visible and
-    // reachable directly from the home menu instead of NFT's being nested
-    // two taps deep under the NFTs menu.
-    [Markup.button.callback(`💰 Real Trading — Tokens: ${tokenRealEnabled ? "🔴 LIVE" : "⚪️ off"}`, "menu:realtrading")],
-    ...(config.openseaApiKey
-      ? [[Markup.button.callback(`🖼 Real Trading — NFTs: ${nftRealEnabled ? "🔴 LIVE" : "⚪️ off"}`, "menu:nftrealtrading")]]
-      : []),
-    [Markup.button.callback("💳 Wallet Balance", "menu:walletbalance"), Markup.button.callback("🔑 Wallet Setup", "menu:wallet")],
-    [Markup.button.callback("📊 Bot Stats", "menu:botstats"), Markup.button.callback("📅 PnL Calendar", "menu:pnlcalendar")],
-    [
-      Markup.button.callback(
-        isCallsChannelEnabled() ? "📢 Post calls to channel: ON (tap to mute)" : "🔇 Post calls to channel: OFF (tap to post)",
-        "menu:togglecallschannel"
-      ),
-    ],
-    ...(config.openseaApiKey ? [[Markup.button.callback("🖼 NFTs", "menu:nft")]] : []),
+    [Markup.button.callback(`💼 Mint wallets (${wallets})`, "menu:mintwallets")],
+    [Markup.button.callback(`${exec.enabled ? "🟢 Minting: ENABLED" : "⚪️ Minting: off"}`, "menu:mintsettings")],
+    [Markup.button.callback("⏰ Armed mints", "menu:armed")],
+    [Markup.button.callback("🛡 Contract scan", "menu:nftcheck")],
+    [Markup.button.callback("📊 Status", "menu:status")],
   ]);
 }
+
 
 function nftMenuKeyboard() {
   const notifsOn = isNftNotificationsEnabled();
@@ -902,20 +885,29 @@ function presetsText() {
 }
 
 function welcomeText() {
-  const chainLabels = getActiveChainDefs().map((c) => c.label).join(", ") || "none — enable some in ⛓ Chains";
+  const wallets = countMintWallets();
+  const exec = loadMintExecutionSettings();
+  const armed = listArmedMints().length;
   return [
-    "🤖 *Degen Assistant*",
-    `Status: ${isPaused() ? "⏸ PAUSED" : "🟢 running"}`,
-    `Watching: ${chainLabels}`,
+    "⚡️ *NFT Mint Underwriter*",
     "",
-    "*How this works:*",
-    "• It watches new token launches, filters out low-quality ones, and posts a call here (or in the channel) when one passes.",
-    "• Paste any contract address any time to get an instant risk score.",
-    "• 📜 Watchlist shows every active call and its live performance.",
-    "• 📈 Paper Trading simulates a strategy with fake money so you can see how it performs.",
-    "• 💰 Real Funds Trading executes actual on-chain trades — locked behind a passcode, off by default.",
+    "*Paste a contract address or a mint link.* That's it — no command.",
+    "It reads the drop straight off the chain and hands you the controls.",
     "",
-    "Use the buttons below to navigate.",
+    "*What you get back:*",
+    "• price, phase open/close, max per wallet, how many are left",
+    "• which contract the mint actually goes to (SeaDrop mints do NOT go to the collection)",
+    "• quantity / wallets / price controls, then MINT or SWEEP",
+    "• ⏰ arm a drop that hasn't opened — it prepares early and fires at the open",
+    "",
+    "*Right now:*",
+    `• Wallets loaded: *${wallets}*`,
+    `• Minting: *${exec.enabled ? "🟢 ENABLED — this bot can spend" : "⚪️ off"}*`,
+    `• Spend ceiling: ${exec.maxSpendEthPerRun} ETH per run`,
+    ...(armed ? [`• Armed: *${armed}* waiting to fire`] : []),
+    "",
+    "No OpenSea or explorer on the critical path — it answers for a contract",
+    "deployed sixty seconds ago.",
   ].join("\n");
 }
 
@@ -2894,8 +2886,7 @@ export function createBot(stats, chainControls, digestControls) {
         ...sent.map((r) => `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\``),
         ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
       ];
-      await ctx.reply(lines.join(
-), { parse_mode: "Markdown" });
+      await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
     } catch (err) {
       await ctx.reply(`Mint failed: ${err.message}`);
     }
@@ -2926,8 +2917,7 @@ export function createBot(stats, chainControls, digestControls) {
         `${config.quantity} per wallet across ${Math.max(config.wallets, 1)} wallet(s)`,
         "",
         "Calldata is built 90s before the open, so firing is a send and nothing else.",
-      ].join(
-),
+      ].join("\n"),
       { parse_mode: "Markdown" }
     );
   });
@@ -2936,8 +2926,7 @@ export function createBot(stats, chainControls, digestControls) {
     const list = listArmedMints();
     if (list.length === 0) return ctx.reply("Nothing armed.");
     await ctx.reply(
-      list.map((a) => `• \`${a.contractAddress}\` — ${a.quantity}x${a.walletCount} at ${a.startsAt.toISOString().slice(0, 19)}Z${a.prepared ? " (prepared)" : ""}`).join(
-),
+      list.map((a) => `• \`${a.contractAddress}\` — ${a.quantity}x${a.walletCount} at ${a.startsAt.toISOString().slice(0, 19)}Z${a.prepared ? " (prepared)" : ""}`).join("\n"),
       { parse_mode: "Markdown" }
     );
   });
@@ -2959,8 +2948,7 @@ export function createBot(stats, chainControls, digestControls) {
         `• Max spend per run: ${st.maxSpendEthPerRun} ETH`,
         `• Gas limit multiplier: ${st.gasLimitMultiplier}`,
         `• Require simulation: ${st.requireSimulation}`,
-      ].join(
-),
+      ].join("\n"),
       {
         parse_mode: "Markdown",
         ...Markup.inlineKeyboard([
@@ -2968,6 +2956,39 @@ export function createBot(stats, chainControls, digestControls) {
         ]),
       }
     );
+  });
+
+  bot.action("menu:mintsettings", async (ctx) => {
+    await ctx.answerCbQuery();
+    if (!isAdmin(ctx)) return;
+    const st = loadMintExecutionSettings();
+    await ctx.reply(
+      [
+        "⚙️ *Mint execution*",
+        `• Enabled: *${st.enabled ? "YES — this bot can spend" : "no"}*`,
+        `• Max spend per run: ${st.maxSpendEthPerRun} ETH`,
+        `• Gas limit multiplier: ${st.gasLimitMultiplier}`,
+        `• Require simulation: ${st.requireSimulation}`,
+      ].join("\n"),
+      {
+        parse_mode: "Markdown",
+        ...Markup.inlineKeyboard([
+          [Markup.button.callback(st.enabled ? "🔴 Disable minting" : "🟢 Enable minting", "mintset:toggle")],
+          [Markup.button.callback("🔙 Menu", "menu:home")],
+        ]),
+      }
+    );
+  });
+
+  bot.action("menu:armed", async (ctx) => {
+    await ctx.answerCbQuery();
+    const list = listArmedMints();
+    const empty = "Nothing armed.\n\nPaste a drop that hasn't opened yet, then tap the Schedule Auto-Mint button.";
+    const rows = list.map(
+      (a) =>
+        `• \`${a.contractAddress}\` — ${a.quantity}x${a.walletCount} at ${a.startsAt.toISOString().slice(0, 19)}Z${a.prepared ? " (prepared)" : ""}`
+    );
+    await ctx.reply(list.length === 0 ? empty : rows.join("\n"), { parse_mode: "Markdown" });
   });
 
   bot.action("mintset:toggle", async (ctx) => {

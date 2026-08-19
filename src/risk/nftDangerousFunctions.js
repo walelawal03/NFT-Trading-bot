@@ -622,6 +622,25 @@ export async function detectNftDangerousFunctions(chain, contractAddress, { budg
   })();
 
   cache.set(cacheKey, promise);
+
+  // Cache successes forever, failures not at all.
+  //
+  // A scan that timed out is a fact about the RPC in that moment, not about
+  // the contract — but it was being cached exactly like a real result, so one
+  // slow moment marked a collection unreadable for the life of the process.
+  // Every later paste returned the poisoned entry instantly, which looked
+  // like a contract that could not be read and was really a bot that had
+  // stopped trying. Retrying could not help, because the retry was served
+  // from the same cache.
+  //
+  // The entry is dropped only after the promise settles, so concurrent
+  // callers still share one in-flight request instead of stampeding.
+  promise
+    .then((result) => {
+      if (!result?.checked) cache.delete(cacheKey);
+    })
+    .catch(() => cache.delete(cacheKey));
+
   return promise;
 }
 

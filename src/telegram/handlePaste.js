@@ -143,7 +143,17 @@ export async function handlePastedTarget(ctx, text) {
   for (const chainKey of chainKeys) {
     const chain = { key: chainKey, ...CHAINS[chainKey] };
     try {
-      const detect = await detectNftMint(chain, target.address, { budgetMs: 8000 });
+      // Retry once before giving up. Robinhood's RPC is intermittently slow
+      // enough to blow the budget on a contract that reads fine seconds
+      // later — measured 1.2s typical against one 7.5s outlier on the same
+      // five contracts. "Unreadable" should mean the chain would not answer,
+      // not that it was briefly busy. The second attempt gets a longer budget
+      // because a person waiting on a paste would rather wait than be told
+      // nothing.
+      let detect = await detectNftMint(chain, target.address, { budgetMs: 8000 });
+      if (!detect.checked) {
+        detect = await detectNftMint(chain, target.address, { budgetMs: 20000 });
+      }
 
       // One message when there is something to mint: the drop's details sit
       // directly above the controls that act on them, so nothing has to be

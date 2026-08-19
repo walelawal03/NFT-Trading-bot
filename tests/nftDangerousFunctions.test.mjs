@@ -356,6 +356,26 @@ cases.push(["budget is honoured and reported as timedOut, not clean", async () =
   assert.ok(v.deduction > 0, "a timed-out scan must cost points");
 }]);
 
+// A timed-out scan is a fact about the RPC in that moment, not about the
+// contract. Caching it meant one slow moment marked a collection unreadable
+// for the life of the process — every later paste served the poisoned entry
+// instantly, and retrying could not help because the retry hit the cache.
+cases.push(["a failed scan is not cached, so a retry can succeed", async () => {
+  A = nextAddr();
+  PROVIDER = new StubProvider({ fail: true });
+  const first = await detectNftDangerousFunctions(CHAIN, A, { budgetMs: 150 });
+  assert.equal(first.checked, false, "first attempt fails");
+
+  // Same address, working provider: must actually re-scan rather than serve
+  // the earlier failure.
+  PROVIDER = new StubProvider({
+    code: { [A.toLowerCase()]: fakeRuntime([...ERC721_BASE, "setBaseURI(string)"]) },
+    calls: { [`${A.toLowerCase()}:${sel("tokenURI(uint256)")}`]: encStr("ipfs://bafy/1.json") },
+  });
+  const second = await detectNftDangerousFunctions(CHAIN, A, { budgetMs: 5000 });
+  assert.equal(second.checked, true, "a retry must be able to succeed after a transient failure");
+}]);
+
 cases.push(["prewarm makes the later scan a zero-network cache hit", async () => {
   A = nextAddr();
   let calls = 0;

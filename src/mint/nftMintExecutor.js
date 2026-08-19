@@ -216,8 +216,25 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
   // maxPriorityFeePerGas is 0 on this chain, so legacy pricing is not
   // underpricing anything; it just stops the balance check reserving headroom
   // that will never be spent.
+  // Priced between two failure modes, both of which have happened here.
+  //
+  // Too low and the node rejects outright: "max fee per gas less than block
+  // base fee, maxFeePerGas 20208000 baseFee 20406000" — the base fee ticked
+  // up in the seconds between reading it and sending, because the raw
+  // gasPrice carried no headroom at all.
+  //
+  // Too high and the BALANCE check refuses: the node reserves
+  // gasLimit * price before execution, so ethers' default EIP-1559 ceiling of
+  // twice the base fee rejected a mint the wallet could actually afford, short
+  // by 0.47 microether.
+  //
+  // 1.25x clears ordinary drift while reserving a quarter more than the
+  // transaction will spend, rather than double. The unused portion is never
+  // charged — overpaying the ceiling costs nothing, being under it costs the
+  // mint.
   const feeData = await provider.getFeeData();
-  const gasPrice = feeData.gasPrice ?? null;
+  const baseline = feeData.gasPrice ?? feeData.maxFeePerGas ?? null;
+  const gasPrice = baseline == null ? null : (baseline * 125n) / 100n;
 
   const results = await Promise.all(
     keys.map(async (privateKey) => {

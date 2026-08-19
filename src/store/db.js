@@ -41,6 +41,25 @@ db.exec(`
     last_seen_at INTEGER
   );
 
+  -- A contract's creator is IMMUTABLE, so a lookup that succeeded once never
+  -- needs to be paid for again. That matters because unauthenticated
+  -- Blockscout allows roughly 10 requests per 26-minute window per host, and
+  -- the collection watcher can hand over 100+ contracts from a single poll
+  -- cycle — without this, re-evaluating a collection we already know about
+  -- spends quota that was already spent, and starves the ones we don't know.
+  --
+  -- Only successes are stored. A rate-limited or failed lookup is not a fact
+  -- about the contract, it is a fact about the minute we asked in, and caching
+  -- it would turn a transient 429 into a permanent "unknown deployer".
+  CREATE TABLE IF NOT EXISTS contract_creators (
+    chain TEXT NOT NULL,
+    contract_address TEXT NOT NULL,
+    creator_address TEXT NOT NULL,
+    creation_tx TEXT,
+    found_at INTEGER NOT NULL,
+    PRIMARY KEY (chain, contract_address)
+  );
+
   -- Decoupled from pending_tokens' own lifecycle on purpose: a token can be
   -- caught as a honeypot on its very first (live-watcher) evaluation, before
   -- any pending_tokens row exists yet (that only gets INSERTed afterward, in
@@ -1138,4 +1157,28 @@ export function getNftRealTradingStats() {
     wins,
     winRate: closed.n > 0 ? wins / closed.n : null,
   };
+}
+
+// ── Contract creator cache ────────────────────────────────────────────────
+//
+// See the table comment: a creator never changes, so this converts a per
+// evaluation explorer call into a once-per-contract one. Addresses are stored
+// lowercased so a checksum-cased lookup cannot miss a row it wrote itself.
+
+export function getCachedContractCreator(chain, contractAddress) {
+  const row = db
+    .prepare(`SELECT creator_address, creation_tx, found_at FROM contract_creators WHERE chain = ? AND contract_address = ?`)
+    .get(chain, String(contractAddress).toLowerCase());
+  if (!row) return null;
+  return { deployerAddress: row.creator_address, creationTx: row.creation_tx, foundAt: row.found_at };
+}
+
+export function cacheContractCreator(chain, contractAddress, { deployerAddress, creationTx = null }) {
+  if (!deployerAddress) return false;
+  db.prepare(
+    `INSERT INTO contract_creators (chain, contract_address, creator_address, creation_tx, found_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(chain, contract_address) DO NOTHING`
+  ).run(chain, String(contractAddress).toLowerCase(), deployerAddress, creationTx, Date.now());
+  return true;
 }

@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import { config } from "../config.js";
+import { getCachedContractCreator, cacheContractCreator } from "../store/db.js";
 
 const BASE_URL = "https://api.etherscan.io/v2/api";
 
@@ -180,10 +181,43 @@ async function getContractCreatorFromBlockscout(blockscoutBaseUrl, tokenAddress)
 //      cannot — so that is a deliberate design call, not a fallback to
 //      slip in quietly.
 export async function getContractCreator(chain, tokenAddress) {
+  // Cache first, and permanently: a contract's creator is set at deployment
+  // and can never change, so a lookup that succeeded once is an answer
+  // forever. This is the single biggest thing that can be done about the
+  // Blockscout ceiling without buying quota — re-evaluating a collection we
+  // already know about used to re-spend a request from a window of about ten,
+  // starving the collections we had never seen.
+  const cached = getCachedContractCreator(chain.key, tokenAddress);
+  if (cached) return { ok: true, deployerAddress: cached.deployerAddress, creationTxHash: cached.creationTx, cached: true };
+
   const result = await getContractCreatorFromEtherscan(chain.etherscanChainId, tokenAddress);
-  if (result.ok || !chain.blockscoutBaseUrl) return result;
+  if (result.ok) {
+    rememberCreator(chain, tokenAddress, result);
+    return result;
+  }
+  if (!chain.blockscoutBaseUrl) return result;
   if (result.reason !== "unsupported_chain" && result.reason !== "no_api_key") return result;
-  return getContractCreatorFromBlockscout(chain.blockscoutBaseUrl, tokenAddress).catch(() => ({ ok: false, reason: "error" }));
+
+  const fallback = await getContractCreatorFromBlockscout(chain.blockscoutBaseUrl, tokenAddress).catch(() => ({ ok: false, reason: "error" }));
+  // Only successes are written. A rate_limited result is a fact about the
+  // minute we asked in, not about the contract — caching it would freeze a
+  // transient 429 into a permanent "unknown deployer".
+  if (fallback.ok) rememberCreator(chain, tokenAddress, fallback);
+  return fallback;
+}
+
+// Never lets a cache write break a lookup that already succeeded. A locked or
+// unwritable database is a reason to be slower next time, not a reason to
+// discard an answer we have in hand.
+function rememberCreator(chain, tokenAddress, result) {
+  try {
+    cacheContractCreator(chain.key, tokenAddress, {
+      deployerAddress: result.deployerAddress,
+      creationTx: result.creationTxHash ?? null,
+    });
+  } catch (err) {
+    console.error("[explorer] could not cache contract creator:", err.message);
+  }
 }
 
 async function getDeployerTxCountFromEtherscan(etherscanChainId, deployerAddress) {

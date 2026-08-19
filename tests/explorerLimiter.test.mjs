@@ -7,6 +7,16 @@
 // requests would stall scoring for minutes.
 import assert from "node:assert";
 
+// Isolated data dir, so the contract-creator cache this exercises writes to a
+// throwaway database rather than the real one. Without it the suite passed on
+// a clean DB and failed on the second run: the cached success short-circuited
+// the fetch, so the `remaining: 0` header that arms the cooldown was never
+// seen. A test that mutates production state is a test that lies once.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+process.env.RAILWAY_VOLUME_MOUNT_PATH = fs.mkdtempSync(path.join(os.tmpdir(), "explorer-limiter-"));
+
 process.env.TELEGRAM_BOT_TOKEN = "111:offline";
 process.env.TELEGRAM_CHAT_ID = "1";
 process.env.ADMIN_USER_ID = "1";

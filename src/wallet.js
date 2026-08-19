@@ -11,7 +11,14 @@ import { loadWalletPrivateKey } from "./walletSettings.js";
 const providerCache = new Map();
 const logProviderCache = new Map();
 
+// Most chains serve JSON-RPC over HTTP on the same host as their WSS, so the
+// HTTPS form is a free extra endpoint. Not all: Robinhood Chain's WSS is an
+// Arbitrum Orbit sequencer feed, and its HTTPS form answers 520 to every
+// request. Deriving it there did not add redundancy, it added a dead entry
+// that looked like redundancy — the provider list read as two endpoints while
+// only one could answer. Chains say so with wssIsSequencerFeed.
 function derivedHttpFromWss(chain) {
+  if (chain.wssIsSequencerFeed) return null;
   const wss = chain.wssEnvVar ? process.env[chain.wssEnvVar] : null;
   if (!wss) return null;
   return wss.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");

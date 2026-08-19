@@ -212,7 +212,69 @@ export const CHAINS = {
     // sequencer stream, not an eth_subscribe-compatible JSON-RPC endpoint —
     // confirmed by inspecting raw frames. Poll over HTTP instead.
     pollingOnly: true,
-    httpRpcUrl: "https://rpc.mainnet.chain.robinhood.com",
+    // Two independent endpoints, because this is the chain the mint bot
+    // actually mints on and it ran on exactly one until 2026-08-19. There was
+    // no redundancy at all: httpUrlsFor's only other entry was the HTTPS form
+    // of the WSS feed above, which answers 520 to every JSON-RPC request
+    // because it is a sequencer stream, not a node. One bad minute at drop
+    // time and nothing gets sent.
+    //
+    // Measured 2026-08-19 against the mint path's real call shapes — chainId,
+    // balance, nonce, getCode, call, gasPrice, feeHistory, estimateGas,
+    // receipt, and a deliberately malformed sendRawTransaction to prove the
+    // endpoint can broadcast at all:
+    //
+    //   endpoint                          all 12 methods   p50
+    //   robinhood-rpc.publicnode.com      OK               200ms
+    //   rpc.mainnet.chain.robinhood.com   OK               306ms
+    //   robinhood.drpc.org                HTTP 400 on 9    212ms
+    //   robinhood.blockpi.network         "Apikey not found"
+    //   rpc.ankr.com/robinhood            403, key required
+    //   4663.rpc.thirdweb.com             "Invalid chain"
+    //   robinhoodchain.blockscout.com     rate limited
+    //
+    // publicnode leads deliberately, against the usual instinct to trust the
+    // first-party endpoint: it is both faster AND fresher. Across 12 paired
+    // samples it was 2-7 blocks AHEAD of the official endpoint and never once
+    // behind — the official URL is the cached/load-balanced one here, so it is
+    // the one that would hand back a stale nonce or a stale getPublicDrop.
+    // Confirmed the same chain, not a fork: identical block hashes at head-50,
+    // head-500, head-5000 and at block 40710666, and an identical receipt
+    // (status, block, both logs) for our own first mint.
+    //
+    // publicnode is a plain public endpoint, not a private-orderflow relay —
+    // the distinction that keeps mevblocker, blockrazor and blxrbdn off every
+    // send path in this file. Set ROBINHOOD_HTTP_RPC to override the order.
+    httpRpcUrls: [
+      "https://robinhood-rpc.publicnode.com",
+      "https://rpc.mainnet.chain.robinhood.com",
+    ],
+    // Logs get their own list for the reason spelled out at length under bsc:
+    // free endpoints disagree about eth_getLogs more than about anything else,
+    // and publicnode is again the one that refuses. Measured 2026-08-19
+    // against the watcher's real query (factory address + topic0):
+    //
+    //   span      publicnode                        official
+    //   10        OK                                OK
+    //   50        OK                                OK
+    //   200       "Archive requests require a       OK
+    //   1000       personal token"                  OK (273ms, 1 log)
+    //
+    // So it serves a ~50-block window and refuses anything deeper. The
+    // watcher polls 1000-block spans, which means leading the log list with
+    // publicnode would burn a failover on every single cycle while looking
+    // like it worked. Official leads here; publicnode still trails it via
+    // httpUrlsFor and covers the narrow spans, which is better than nothing
+    // if the official endpoint drops.
+    //
+    // This is exactly the split that made a real BSC buy report as a failed
+    // trade on 2026-08-16 — same operator, same refusal, caught before it
+    // shipped this time rather than after.
+    logRpcUrls: ["https://rpc.mainnet.chain.robinhood.com"],
+    // The WSS above is an Arbitrum Orbit sequencer feed, so its HTTPS form is
+    // not a node and must never be derived into the RPC list — see
+    // derivedHttpFromWss in wallet.js. Measured: HTTP 520 on eth_chainId.
+    wssIsSequencerFeed: true,
     nativeSymbol: "ETH",
     factories: [
       uniswapV2Factory("0x8bceaa40b9acdfaedf85adf4ff01f5ad6517937f"),

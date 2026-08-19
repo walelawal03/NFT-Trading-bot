@@ -20,7 +20,7 @@ export { countMintWallets as walletCount } from "./mintWallets.js";
 // zero, and defaulting unknown to 0 would make every such drop unmintable.
 const clamp = (n, min, max) => Math.max(min, max == null ? n : Math.min(n, max));
 
-export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null }) {
+export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null }) {
   const maxPerWallet = detect.phase?.maxPerWallet ?? null;
   const walletCount = countMintWallets();
 
@@ -31,6 +31,12 @@ export function startSession(chatId, { chain, contractAddress, detect, openseaSl
     // Presentation only — which URL Telegram should render a preview card
     // for. Never used to decide anything about the mint.
     openseaSlug,
+    // Also presentation only: the first wallet's balance and the ETH price,
+    // so the card can say what a mint costs in money you recognise. Neither
+    // is consulted when building or sending a transaction — the executor
+    // re-reads balance itself, and a price feed must never gate a mint.
+    walletBalanceWei,
+    ethUsd,
     // Start at the cap rather than 1: someone who opened this wants the
     // allocation, and the cap is the answer they would tap toward anyway.
     quantity: maxPerWallet ?? 1,

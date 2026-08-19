@@ -49,6 +49,26 @@ export function parsePastedTarget(text) {
 // path deliberately: a link that already contains an address never waits on
 // OpenSea, because the whole reason this bot reads chains directly is that
 // aggregators are slow and often have not indexed a new drop at all.
+/**
+ * Balance of the first mint wallet, plus the ETH price — both for display.
+ *
+ * Concurrent and individually fault-tolerant: neither is worth delaying a
+ * mint card for, and a missing one renders as absent rather than blocking or
+ * throwing. Nothing downstream reads them to decide anything.
+ */
+export async function loadCardExtras(chain) {
+  const { getProvider } = await import("../wallet.js");
+  const { listMintWallets } = await import("../mint/mintWallets.js");
+  const { getEthUsd } = await import("../mint/nativePrice.js");
+
+  const first = listMintWallets()[0] ?? null;
+  const [walletBalanceWei, ethUsd] = await Promise.all([
+    first ? getProvider(chain).getBalance(first.address).catch(() => null) : Promise.resolve(null),
+    getEthUsd().catch(() => null),
+  ]);
+  return { walletBalanceWei, ethUsd };
+}
+
 // Contract -> OpenSea slug, for the preview card only. Short-circuits to null
 // on any failure: an unindexed drop is the normal case here, not an error.
 async function resolveSlugForContract(chainKey, contractAddress) {
@@ -136,11 +156,14 @@ export async function handlePastedTarget(ctx, text) {
         // one OpenSea call in this flow, and a fresh drop OpenSea has not
         // indexed must still get its card without waiting on a miss.
         const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
+        const { walletBalanceWei, ethUsd } = await loadCardExtras(chain);
         const config = mintSession.startSession(ctx.chat.id, {
           chain,
           contractAddress: target.address,
           detect,
           openseaSlug,
+          walletBalanceWei,
+          ethUsd,
         });
         await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });
       } else {

@@ -4,6 +4,7 @@ import { totalCostWei } from "../mint/mintSession.js";
 import { countMintWallets } from "../mint/mintWallets.js";
 import { explorerUrlFor } from "./formatMessage.js";
 import { openseaChainSlug } from "../risk/opensea.js";
+import { usdSuffix } from "../mint/nativePrice.js";
 
 // One message: what the drop is, and the controls to mint it.
 //
@@ -70,13 +71,29 @@ export function buildMintConfigText(config) {
   if (closes) lines.push(`• Closes: ${closes}`);
 
   const wallets = Math.max(config.wallets, 1);
+  const totalEth = total == null ? null : Number(formatEther(total));
+  const balEth = config.walletBalanceWei == null ? null : Number(formatEther(config.walletBalanceWei));
+
   lines.push(
     "",
     "⚙️ *Your mint*",
     `• ${config.quantity} per wallet × ${wallets} wallet${wallets === 1 ? "" : "s"} = *${config.quantity * wallets} total*`,
-    `• Cost: *${total == null ? "unknown" : `${Number(formatEther(total))} ETH`}*${config.priceOverrideWei != null ? " _(price overridden)_" : ""}`,
-    `• Wallets loaded: ${walletsAvailable}`
+    `• Cost: *${totalEth == null ? "unknown" : `${totalEth} ETH`}*${totalEth == null ? "" : usdSuffix(totalEth, config.ethUsd)}` +
+      `${config.priceOverrideWei != null ? " _(price overridden)_" : ""}`
   );
+
+  // Balance next to cost, because "0.03 ETH" means nothing until you know
+  // whether you hold it. Only the first wallet's balance — the roster screen
+  // is where the full set lives, and a mint card listing twenty balances
+  // would bury the controls it exists to present.
+  if (balEth != null) {
+    const short = totalEth != null && balEth <= totalEth;
+    // usdSuffix renders 0 as "(free)", which is right for a cost and absurd
+    // for a balance — an empty wallet is not free, it is empty.
+    const balUsd = balEth > 0 ? usdSuffix(balEth, config.ethUsd) : "";
+    lines.push(`• Wallet: ${balEth.toFixed(5)} ETH${balUsd}${short ? " ⚠️ *not enough — fund this wallet*" : ""}`);
+  }
+  lines.push(`• Wallets loaded: ${walletsAvailable}`);
 
   // Anything that would stop the mint goes ABOVE the buttons. Someone about
   // to tap CONFIRM should already know it cannot work.

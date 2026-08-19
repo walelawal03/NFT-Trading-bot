@@ -77,7 +77,7 @@ import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
-import { handlePastedTarget } from "./handlePaste.js";
+import { handlePastedTarget, loadCardExtras } from "./handlePaste.js";
 import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
@@ -2917,11 +2917,18 @@ export function createBot(stats, chainControls, digestControls) {
     const current = mintSession.getSession(ctx.chat.id);
     if (!current) return ctx.reply("That mint session expired — paste the address again.");
     try {
-      const detect = await detectNftMint(current.chain, current.contractAddress, { budgetMs: 8000 });
+      const [detect, extras] = await Promise.all([
+        detectNftMint(current.chain, current.contractAddress, { budgetMs: 8000 }),
+        loadCardExtras(current.chain),
+      ]);
       const config = mintSession.startSession(ctx.chat.id, {
         chain: current.chain,
         contractAddress: current.contractAddress,
         detect,
+        // Carried through refresh: the slug does not change, and losing the
+        // balance on refresh would make the card worse each time you tapped it.
+        openseaSlug: current.openseaSlug,
+        ...extras,
       });
       await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), mintCardExtra(config));
     } catch (err) {

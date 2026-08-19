@@ -1,5 +1,5 @@
 {
-  "enabled": false,
+  "enabled": true,
   "dryRun": true,
   "maxSpendEthPerRun": 0.05,
   "gasLimitMultiplier": 1.3,

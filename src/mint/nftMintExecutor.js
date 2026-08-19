@@ -335,22 +335,56 @@ export async function prepareSignedMints(chain, { detect, contractAddress, quant
  * left to decide. Concurrent because the wallets are independent and the gap
  * between first and last is the gap between minting and not.
  */
-export async function broadcastSigned(chain, signed) {
+export async function broadcastSigned(chain, signed, { call } = {}) {
   const settings = loadMintExecutionSettings();
   const provider = getProvider(chain);
   const ready = signed.filter((s) => s.ok);
+
+  // A pre-signed transaction carries its nonce in the signature, so anything
+  // else the wallet sends between preparing and firing invalidates it. That
+  // is not hypothetical: the first wallet imported here turned out to be the
+  // token bot's own trading wallet, which had sent four transactions in the
+  // preceding hour.
+  //
+  // Rather than police which wallet is which, recover from it. Fire the
+  // pre-signed bytes first — the fast path, one round trip, unchanged in the
+  // common case — and only if the node rejects it for a nonce reason, re-sign
+  // against a fresh nonce and send again. Costs nothing when nothing moved.
+  const isNonceError = (m) => /nonce|already known|replacement transaction underpriced|known transaction/i.test(m || "");
 
   return Promise.all(
     ready.map(async (s) => {
       if (settings.dryRun) {
         return { address: s.address, ok: true, stage: "dry-run", valueWei: s.valueWei, gasLimit: s.gasLimit };
       }
+
+      const t0 = Date.now();
       try {
-        const t0 = Date.now();
         const tx = await provider.broadcastTransaction(s.raw);
         return { address: s.address, ok: true, stage: "sent", txHash: tx.hash, valueWei: s.valueWei, sendMs: Date.now() - t0 };
       } catch (err) {
-        return { address: s.address, ok: false, stage: "broadcast", reason: err.shortMessage || err.message };
+        const reason = err.shortMessage || err.message;
+        if (!isNonceError(reason) || !call) {
+          return { address: s.address, ok: false, stage: "broadcast", reason };
+        }
+
+        // Re-sign against the current nonce. Keys are fetched here rather than
+        // carried on the armed entry, so nothing holds key material while a
+        // scheduled mint sits waiting.
+        try {
+          const key = loadMintWalletSigningKeys().find((k) => new Wallet(k).address.toLowerCase() === s.address.toLowerCase());
+          if (!key) return { address: s.address, ok: false, stage: "broadcast", reason: `${reason} (wallet no longer in roster)` };
+
+          const wallet = new Wallet(key, provider);
+          const nonce = await provider.getTransactionCount(s.address, "pending");
+          const tx = await wallet.sendTransaction({ ...call, nonce, gasLimit: s.gasLimit, gasPrice: s.gasPrice });
+          return {
+            address: s.address, ok: true, stage: "sent-resigned", txHash: tx.hash,
+            valueWei: s.valueWei, sendMs: Date.now() - t0, note: `nonce moved (${s.nonce} -> ${nonce}), re-signed`,
+          };
+        } catch (err2) {
+          return { address: s.address, ok: false, stage: "resign", reason: err2.shortMessage || err2.message };
+        }
       }
     })
   );

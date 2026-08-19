@@ -103,7 +103,9 @@ async function prepare(entry, notify) {
       await notify?.(entry.chatId, `⚠️ Couldn't prepare \`${entry.contractAddress}\`: ${prep.reason ?? prep.signed.map((x) => x.reason).filter(Boolean).join("; ")}`);
       return;
     }
-    entry.prepared = { signed: prep.signed, preparedAt: Date.now() };
+    // The call is kept alongside the signatures so a stale nonce can be
+    // recovered at fire time without redoing any of the reads.
+    entry.prepared = { signed: prep.signed, call: prep.call, preparedAt: Date.now() };
     const ready = prep.signed.filter((x) => x.ok).length;
     await notify?.(entry.chatId, `🔧 Prepared ${ready} signed transaction(s) for \`${entry.contractAddress}\` — firing at the open.`);
   } catch (err) {
@@ -126,7 +128,7 @@ async function fire(entry, notify) {
       return;
     }
 
-    const results = await broadcastSigned(chain, entry.prepared.signed);
+    const results = await broadcastSigned(chain, entry.prepared.signed, { call: entry.prepared.call });
     const elapsed = Date.now() - t0;
     const sent = results.filter((r) => r.ok);
     const failed = results.filter((r) => !r.ok);
@@ -138,7 +140,11 @@ async function fire(entry, notify) {
         : dry
           ? `🧪 *Scheduled dry run* — ${sent.length} would have fired in ${elapsed}ms`
           : `🚀 *Scheduled mint fired* in ${elapsed}ms — ${entry.contractAddress}`,
-      ...sent.map((r) => (r.stage === "dry-run" ? `  ✅ \`${r.address.slice(0, 10)}…\` (dry run)` : `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\` (${r.sendMs}ms)`)),
+      ...sent.map((r) =>
+        r.stage === "dry-run"
+          ? `  ✅ \`${r.address.slice(0, 10)}…\` (dry run)`
+          : `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\` (${r.sendMs}ms)${r.note ? ` — ${r.note}` : ""}`
+      ),
       ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
     ];
     await notify?.(entry.chatId, lines.join("\n"));

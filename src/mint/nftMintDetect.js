@@ -91,12 +91,26 @@ const BASE_ABI = [
 // the normal case — most contracts implement one name out of five — so a
 // rejection here is not an error worth surfacing.
 async function firstAnswer(address, provider, abis) {
-  for (const abi of abis) {
-    const name = abi.match(/function (\w+)\(/)[1];
-    const value = await new Contract(address, [abi], provider)[name]().catch(() => null);
-    if (value !== null && value !== undefined) return { name, value };
-  }
-  return null;
+  // All candidates at once, not one after another.
+  //
+  // These lists are guesses at what a launchpad happened to name its getter —
+  // price alone has five spellings — and every miss reverts. Probing
+  // sequentially paid a full round trip per miss: measured ~250ms each on
+  // Robinhood, so a direct-mint contract could spend 3+ seconds discovering
+  // names. Issued together, ethers coalesces them into one batched request
+  // and the whole set costs one round trip.
+  //
+  // Preference is preserved by INDEX, not by arrival: whichever answers first
+  // in wall-clock time is irrelevant, mintPrice() must still win over
+  // cost() so the same contract always reports the same number.
+  const results = await Promise.all(
+    abis.map(async (abi) => {
+      const name = abi.match(/function (\w+)\(/)[1];
+      const value = await new Contract(address, [abi], provider)[name]().catch(() => null);
+      return value !== null && value !== undefined ? { name, value } : null;
+    })
+  );
+  return results.find(Boolean) ?? null;
 }
 
 /**
@@ -124,6 +138,21 @@ export async function detectNftMint(chain, contractAddress, { budgetMs = 8000 } 
   // and this module has no business reimplementing any of it. CASH DOGS is a
   // 45-byte clone whose own bytecode has zero selectors; read the stub and
   // you conclude the collection cannot be minted at all.
+  // The collection's own metadata depends on nothing the scan returns, so it
+  // is started alongside rather than after it. Waiting for proxy resolution
+  // before asking a contract its own name cost a full round trip for no
+  // reason — measured worth ~400ms of a ~1.9s read.
+  const metadataPromise = Promise.all([
+    new Contract(contractAddress, BASE_ABI, provider).name().catch(() => null),
+    new Contract(contractAddress, BASE_ABI, provider).symbol().catch(() => null),
+    new Contract(contractAddress, BASE_ABI, provider).totalSupply().catch(() => null),
+    firstAnswer(contractAddress, provider, [
+      "function maxSupply() view returns (uint256)",
+      "function MAX_SUPPLY() view returns (uint256)",
+      "function maxTotalSupply() view returns (uint256)",
+    ]),
+  ]);
+
   const scan = await detectNftDangerousFunctions(chain, contractAddress, { budgetMs }).catch(() => null);
   const implementation = scan?.proxy?.implementation ?? contractAddress;
 
@@ -157,16 +186,7 @@ export async function detectNftMint(chain, contractAddress, { budgetMs = 8000 } 
     };
   }
 
-  const [name, symbol, totalSupply, maxSupplyAnswer] = await Promise.all([
-    new Contract(contractAddress, BASE_ABI, provider).name().catch(() => null),
-    new Contract(contractAddress, BASE_ABI, provider).symbol().catch(() => null),
-    new Contract(contractAddress, BASE_ABI, provider).totalSupply().catch(() => null),
-    firstAnswer(contractAddress, provider, [
-      "function maxSupply() view returns (uint256)",
-      "function MAX_SUPPLY() view returns (uint256)",
-      "function maxTotalSupply() view returns (uint256)",
-    ]),
-  ]);
+  const [name, symbol, totalSupply, maxSupplyAnswer] = await metadataPromise;
   const maxSupply = maxSupplyAnswer?.value ?? null;
 
   const base = {

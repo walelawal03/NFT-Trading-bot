@@ -92,11 +92,18 @@ export function buildMintConfigText(config) {
   // is where the full set lives, and a mint card listing twenty balances
   // would bury the controls it exists to present.
   if (balEth != null) {
-    const short = totalEth != null && balEth <= totalEth;
+    // Compare against cost PLUS gas, not cost alone. A balance of 0.00051
+    // against a 0.0005 mint looks fine and is not: the transaction still has
+    // to pay for itself, and that mint failed for want of 0.47 microether.
+    // The reserve is a rough ceiling for one mint on these chains, deliberate
+    // in being generous — telling someone to top up costs them nothing, and
+    // a failed mint costs them the drop.
+    const GAS_RESERVE_ETH = 0.00001;
+    const short = totalEth != null && balEth < totalEth + GAS_RESERVE_ETH;
     // usdSuffix renders 0 as "(free)", which is right for a cost and absurd
     // for a balance — an empty wallet is not free, it is empty.
     const balUsd = balEth > 0 ? usdSuffix(balEth, config.ethUsd) : "";
-    lines.push(`• Wallet: ${balEth.toFixed(5)} ETH${balUsd}${short ? " ⚠️ *not enough — fund this wallet*" : ""}`);
+    lines.push(`• Wallet: ${balEth.toFixed(6)} ETH${balUsd}${short ? " ⚠️ *not enough once gas is counted*" : ""}`);
   }
   lines.push(`• Wallets loaded: ${walletsAvailable}`);
 

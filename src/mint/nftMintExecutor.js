@@ -177,6 +177,20 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
 
   const provider = getProvider(chain);
 
+  // Price the transaction explicitly, the same way prepareSignedMints does.
+  //
+  // Left unset, ethers populates EIP-1559 fields and sets maxFeePerGas to
+  // roughly twice the base fee. The node then checks the balance against that
+  // ceiling, not against what the transaction will actually cost — so a mint
+  // that needed 0.000503 ETH was rejected against a 0.000506 balance for
+  // wanting 0.000507. Observed exactly that, short by 0.47 microether.
+  //
+  // maxPriorityFeePerGas is 0 on this chain, so legacy pricing is not
+  // underpricing anything; it just stops the balance check reserving headroom
+  // that will never be spent.
+  const feeData = await provider.getFeeData();
+  const gasPrice = feeData.gasPrice ?? null;
+
   const results = await Promise.all(
     keys.map(async (privateKey) => {
       const wallet = new Wallet(privateKey, provider);
@@ -204,7 +218,7 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
           return { address, ok: true, stage: "dry-run", gasLimit, valueWei: call.value, to: call.to };
         }
 
-        const tx = await wallet.sendTransaction({ ...call, gasLimit });
+        const tx = await wallet.sendTransaction({ ...call, gasLimit, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
         return { address, ok: true, stage: "sent", txHash: tx.hash, valueWei: call.value };
       } catch (err) {
         return { address, ok: false, stage: "send", reason: err.shortMessage || err.message };

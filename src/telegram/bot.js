@@ -77,6 +77,7 @@ import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
+import { handlePastedTarget } from "./handlePaste.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
@@ -1617,7 +1618,6 @@ async function handlePendingAction(ctx, pending, text, digestControls) {
   }
 
   if (pending.type === "mintWalletImport") {
-    if (!(await requireRealTradingUnlock(ctx))) return;
     // Scrub before parsing, exactly like walletImportKey below: the key should
     // not linger in chat history whether or not it turned out to be valid.
     await ctx.deleteMessage(ctx.message.message_id).catch(() => {});
@@ -1693,8 +1693,9 @@ export function createBot(stats, chainControls, digestControls) {
     console.error(`Bot handler error (update ${ctx.updateType}):`, err.message);
   });
 
-  // Keep Telegram's "/" autocomplete minimal — buttons are the primary nav now.
-  bot.telegram.setMyCommands([{ command: "start", description: "Open the menu" }]).catch(() => {});
+  // The command list is registered by scripts/setupBotFather.mjs and is NOT
+  // overwritten here. This used to set a single /start entry on every boot,
+  // which silently wiped the real list minutes after it was published.
 
   // Bot-wide access gate — drops the update before any handler (including
   // /start) ever sees it, rather than relying solely on the per-action
@@ -2808,7 +2809,6 @@ export function createBot(stats, chainControls, digestControls) {
   bot.action("mintwallet:import", async (ctx) => {
     await ctx.answerCbQuery();
     if (!isAdmin(ctx)) return;
-    if (!(await requireRealTradingUnlock(ctx))) return;
     setPending(ctx.chat.id, { type: "mintWalletImport" });
     await ctx.reply(
       [
@@ -3340,25 +3340,15 @@ export function createBot(stats, chainControls, digestControls) {
     const pending = takePending(ctx.chat.id);
     if (pending) return handlePendingAction(ctx, pending, text, digestControls);
 
-    const match = text.match(ADDRESS_RE);
-    if (!match) return;
-    const tokenAddress = match[0];
-
-    await ctx.reply(`Looking up \`${tokenAddress}\`…`, { parse_mode: "Markdown" });
-    try {
-      const chainKeys = await detectChains(tokenAddress);
-      if (chainKeys.length === 0) {
-        return ctx.reply(
-          `Couldn't find this token on any supported chain (${Object.keys(CHAINS).join(", ")}). ` +
-            `It may be too new to be indexed yet, or on a chain this bot doesn't watch.`
-        );
-      }
-      for (const chainKey of chainKeys) {
-        await scoreAndReply(ctx, chainKey, tokenAddress);
-      }
-    } catch (err) {
-      ctx.reply(`Failed to analyze token: ${err.message}`);
-    }
+    // Mint first. A pasted address or link is a drop someone wants to mint,
+    // not a token they want scored — this is a mint bot, and the old
+    // token-scoring fallthrough belonged to the trading bot this was seeded
+    // from.
+    const handled = await handlePastedTarget(ctx, text).catch(async (err) => {
+      await ctx.reply(`Failed to read that: ${err.message}`);
+      return true;
+    });
+    if (!handled) return;
   });
 
   return bot;

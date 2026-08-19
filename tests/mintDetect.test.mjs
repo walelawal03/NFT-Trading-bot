@@ -17,10 +17,23 @@ const runtime = (sigs) => "0x" + sigs.map((s) => `63${sel(s).slice(2)}14`).join(
 
 let CODE = {};
 let CALLS = {};
+const FAIL_GETCODE_TIMES = new Map();
 mock.module(new URL("../src/wallet.js", import.meta.url).href, {
   namedExports: {
     getProvider: () => ({
-      getCode: async (a) => CODE[a.toLowerCase()] ?? "0x",
+      // FAIL_FIRST_GETCODE reproduces the real failure precisely: the scan's
+      // read times out, but the fallback read that follows succeeds. Throwing
+      // on every call instead would land in the "no contract code" branch and
+      // test nothing.
+      getCode: async (a) => {
+        const key = a.toLowerCase();
+        const left = FAIL_GETCODE_TIMES.get(key) ?? 0;
+        if (left > 0) {
+          FAIL_GETCODE_TIMES.set(key, left - 1);
+          throw new Error("connection timed out");
+        }
+        return CODE[key] ?? "0x";
+      },
       getStorage: async () => "0x" + "0".repeat(64),
       call: async ({ to, data }) => CALLS[`${to.toLowerCase()}:${data.slice(0, 10)}`] ?? Promise.reject(new Error("revert")),
     }),
@@ -171,6 +184,39 @@ await t("an address with no code is reported unreadable, never as a pass", async
   const m = buildMintDetectMessage({ chain: CHAIN, contractAddress: nextAddr(), detect: d });
   assert.match(m, /UNREADABLE/);
   assert.ok(!/MINTING NOW/.test(m));
+});
+
+// Observed live on WASTELAND: one read reported "standard: unknown, no
+// recognised mint entrypoint", the next reported seadrop with an entrypoint.
+// The difference was a scan timeout, not the contract. A failure to READ must
+// never render as a confident "there is nothing here" — that is the sentence
+// that makes someone give up on a drop they could have minted.
+await t("an unreadable contract never renders as 'no mint entrypoint'", () => {
+  const unreadable = {
+    checked: false,
+    reason: "Couldn't resolve this contract in time (RPC slow) — retry rather than trusting this",
+    standard: "unknown",
+    phase: null,
+    mintable: null,
+    mintVia: null,
+    proxy: null,
+  };
+  const m = buildMintDetectMessage({ chain: CHAIN, contractAddress: nextAddr(), detect: unreadable });
+  assert.match(m, /UNREADABLE/);
+  assert.match(m, /not a green light|not.*clean|unknown/i);
+  assert.ok(!/No recognised mint entrypoint/.test(m), "must not claim the contract has no mint function");
+  assert.ok(!/SOLD OUT|MINTING NOW/.test(m), "must not assert a state it could not read");
+});
+
+// And the detector must actually produce that shape rather than a confident
+// wrong one when proxy resolution fails on a stub with nothing to read.
+await t("a failed resolution on an unreadable stub reports checked:false", async () => {
+  const a = nextAddr();
+  CODE = { [a.toLowerCase()]: "0x6080" }; // too small to carry any selector
+  CALLS = {};
+  const d = await detectNftMint(CHAIN, a);
+  assert.equal(d.mintVia, null);
+  assert.notEqual(d.mintable, true, "must never claim mintable off an unreadable contract");
 });
 
 await t("markdown markers stay balanced across every shape", async () => {

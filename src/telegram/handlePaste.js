@@ -144,8 +144,12 @@ export async function handlePastedTarget(ctx, text) {
         });
         await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });
       } else {
+        // Sold out or no entrypoint still gets the OpenSea card — you often
+        // want to look at a drop you just missed, and the preview is the most
+        // useful part of the message when there are no controls to offer.
+        const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
         await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
-          parse_mode: "Markdown",
+          ...mintCardExtra({ chain, contractAddress: target.address, openseaSlug }),
         });
       }
     } catch (err) {

@@ -133,6 +133,30 @@ export async function detectNftMint(chain, contractAddress, { budgetMs = 8000 } 
   }
   const selectors = new Set(extractSelectors(code));
 
+  // "Couldn't read it" must never render as "it has no mint function".
+  //
+  // When the capability scan times out — which Robinhood's public RPC does
+  // regularly — implementation falls back to the address itself. For a clone
+  // that is a 45-byte stub with zero selectors, so the result was a confident
+  // "standard: unknown, no recognised mint entrypoint" for a contract that is
+  // in fact a perfectly ordinary SeaDrop drop. Observed live on WASTELAND:
+  // one read said unknown with no entrypoint, the next said seadrop with one.
+  //
+  // A failed resolution plus an unreadably small selector set is a failure to
+  // read, and is reported as one.
+  const resolutionFailed = !scan || scan.checked === false;
+  if (resolutionFailed && selectors.size < 8) {
+    return {
+      checked: false,
+      reason: "Couldn't resolve this contract in time (RPC slow) — retry rather than trusting this",
+      standard: "unknown",
+      phase: null,
+      mintable: null,
+      mintVia: null,
+      proxy: scan?.proxy ?? null,
+    };
+  }
+
   const [name, symbol, totalSupply, maxSupplyAnswer] = await Promise.all([
     new Contract(contractAddress, BASE_ABI, provider).name().catch(() => null),
     new Contract(contractAddress, BASE_ABI, provider).symbol().catch(() => null),

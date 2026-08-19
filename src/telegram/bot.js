@@ -79,6 +79,7 @@ import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKe
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget, loadCardExtras } from "./handlePaste.js";
 import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
+import { buyNftCollectionFloor } from "../execution/nftExecutor.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
@@ -2933,6 +2934,53 @@ export function createBot(stats, chainControls, digestControls) {
   };
 
   bot.action("mint:noop", (ctx) => ctx.answerCbQuery());
+
+  // Buy the cheapest live listing, for a collection whose mint is over.
+  //
+  // Gated by the same switches as minting — execution enabled, dry run off —
+  // because it spends the same wallets from the same balance. A separate set
+  // of toggles would mean turning minting off did not stop this from
+  // spending.
+  //
+  // maxPriceEth is the listing price we showed you and nothing looser: the
+  // listing can be filled by someone else between rendering and tapping, and
+  // the executor must not silently fill a dearer one in its place.
+  bot.action("mint:buyfloor", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That session expired — paste the address again.");
+    if (!config.listing?.priceEth) return ctx.reply("No live listing to buy — tap 🔄 Refresh.");
+
+    const settings = loadMintExecutionSettings();
+    if (!settings.enabled) return ctx.reply("⛔️ Execution is disabled. Turn it on in mint settings first.");
+    if (settings.dryRun) {
+      return ctx.reply(
+        [
+          "🧪 *Dry run — nothing was bought.*",
+          "",
+          `Would fill \`${config.listing.orderHash?.slice(0, 12) ?? "listing"}…\` at *${config.listing.priceEth} ETH*` +
+            `${config.listing.tokenId ? ` for #${config.listing.tokenId}` : ""}.`,
+          "",
+          "Go LIVE in /mintsettings to buy for real.",
+        ].join("\n"),
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    await ctx.reply(`Buying floor at ${config.listing.priceEth} ETH…`);
+    try {
+      const result = await buyNftCollectionFloor(config.chain, {
+        contractAddress: config.contractAddress,
+        maxPriceEth: config.listing.priceEth,
+      });
+      await ctx.reply(
+        `🛒 *Bought* ${result?.tokenId ? `#${result.tokenId}` : ""} for ${result?.priceEth ?? config.listing.priceEth} ETH\n\`${result?.txHash ?? ""}\``,
+        { parse_mode: "Markdown" }
+      );
+    } catch (err) {
+      await ctx.reply(`Buy failed: ${err.shortMessage || err.message}`);
+    }
+  });
 
   // Re-reads the drop. Worth its own button because these change under you:
   // a collection's advertised price and per-wallet cap were both observed

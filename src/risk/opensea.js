@@ -203,3 +203,43 @@ export async function postListing(chainKey, signedOrder) {
   });
   return body.order || body;
 }
+
+/**
+ * Cheapest live listing for a collection, by slug.
+ *
+ * The older getCheapestListing above queries /orders/{chain}/seaport/listings,
+ * which returns 405 Method Not Allowed for Robinhood Chain — verified live
+ * 2026-08-19 against two collections. That endpoint is contract-addressed and
+ * apparently not served for every chain; this one is slug-addressed and
+ * answers fine for the same collections.
+ *
+ * Kept as a separate function rather than replacing the original, because
+ * nftRealTrading.js depends on the contract-addressed form and its own
+ * behaviour is not this change's business.
+ */
+export async function getBestListingBySlug(slug) {
+  const body = await request(`/listings/collection/${slug}/best`, { params: { limit: 1 } });
+  const listing = body.listings?.[0];
+  if (!listing) return null;
+
+  const params = listing.protocol_data?.parameters;
+  const offerItem = params?.offer?.[0];
+
+  // price.current.value is in the payment token's smallest unit. Falling back
+  // to summing consideration keeps this working if the shape shifts, since a
+  // listing whose price cannot be read is one that must not be filled.
+  const raw = listing.price?.current?.value;
+  const decimals = listing.price?.current?.decimals ?? 18;
+  const priceEth =
+    raw != null
+      ? Number(raw) / 10 ** decimals
+      : (params?.consideration || []).reduce((sum, c) => sum + Number(c.startAmount || 0), 0) / 1e18;
+
+  return {
+    orderHash: listing.order_hash,
+    protocolAddress: listing.protocol_address,
+    tokenId: offerItem?.identifierOrCriteria ?? null,
+    priceEth: priceEth > 0 ? priceEth : null,
+    raw: listing,
+  };
+}

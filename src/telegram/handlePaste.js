@@ -2,7 +2,7 @@ import { CHAINS } from "../chains.js";
 import { getNftChainKeys } from "../nftChains.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, mintCardExtra, secondaryKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 
 // Paste a contract address or a mint link; get mint options. No command.
@@ -56,17 +56,25 @@ export function parsePastedTarget(text) {
  * mint card for, and a missing one renders as absent rather than blocking or
  * throwing. Nothing downstream reads them to decide anything.
  */
-export async function loadCardExtras(chain) {
+export async function loadCardExtras(chain, { slug = null, contractAddress = null } = {}) {
   const { getProvider } = await import("../wallet.js");
   const { listMintWallets } = await import("../mint/mintWallets.js");
   const { getEthUsd } = await import("../mint/nativePrice.js");
+  const { getCollectionStats, getBestListingBySlug } = await import("../risk/opensea.js");
 
   const first = listMintWallets()[0] ?? null;
-  const [walletBalanceWei, ethUsd] = await Promise.all([
+
+  // Market data is only meaningful once a collection has traded, and it comes
+  // from OpenSea — so it is fetched alongside everything else and every piece
+  // fails to null independently. A drop minutes old has none of this, which
+  // is normal and must never hold up or break the card.
+  const [walletBalanceWei, ethUsd, stats, listing] = await Promise.all([
     first ? getProvider(chain).getBalance(first.address).catch(() => null) : Promise.resolve(null),
     getEthUsd().catch(() => null),
+    slug ? getCollectionStats(slug).catch(() => null) : Promise.resolve(null),
+    slug ? getBestListingBySlug(slug).catch(() => null) : Promise.resolve(null),
   ]);
-  return { walletBalanceWei, ethUsd };
+  return { walletBalanceWei, ethUsd, stats, listing };
 }
 
 // Contract -> OpenSea slug, for the preview card only. Short-circuits to null
@@ -166,23 +174,34 @@ export async function handlePastedTarget(ctx, text) {
         // one OpenSea call in this flow, and a fresh drop OpenSea has not
         // indexed must still get its card without waiting on a miss.
         const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
-        const { walletBalanceWei, ethUsd } = await loadCardExtras(chain);
+        const extras = await loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address });
         const config = mintSession.startSession(ctx.chat.id, {
           chain,
           contractAddress: target.address,
           detect,
           openseaSlug,
-          walletBalanceWei,
-          ethUsd,
+          ...extras,
         });
         await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });
       } else {
         // Sold out or no entrypoint still gets the OpenSea card — you often
         // want to look at a drop you just missed, and the preview is the most
         // useful part of the message when there are no controls to offer.
+        // The mint is over. That is exactly when the secondary market becomes
+        // the answer, so this path loads floor/volume/listing and offers a
+        // buy rather than just reporting that you are too late.
         const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
-        await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
-          ...mintCardExtra({ chain, contractAddress: target.address, openseaSlug }),
+        const extras = await loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address });
+        const config = mintSession.startSession(ctx.chat.id, {
+          chain,
+          contractAddress: target.address,
+          detect,
+          openseaSlug,
+          ...extras,
+        });
+        await ctx.reply(buildMintConfigText(config), {
+          ...mintCardExtra(config),
+          ...secondaryKeyboard(config),
         });
       }
     } catch (err) {

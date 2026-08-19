@@ -20,7 +20,7 @@ export { countMintWallets as walletCount } from "./mintWallets.js";
 // zero, and defaulting unknown to 0 would make every such drop unmintable.
 const clamp = (n, min, max) => Math.max(min, max == null ? n : Math.min(n, max));
 
-export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null }) {
+export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null, stats = null, listing = null }) {
   const maxPerWallet = detect.phase?.maxPerWallet ?? null;
   const walletCount = countMintWallets();
 
@@ -37,6 +37,10 @@ export function startSession(chatId, { chain, contractAddress, detect, openseaSl
     // re-reads balance itself, and a price feed must never gate a mint.
     walletBalanceWei,
     ethUsd,
+    // Secondary-market view: OpenSea's collection stats and the cheapest
+    // live listing. Display, plus the price the buy button fills at.
+    stats,
+    listing,
     // Start at the cap rather than 1: someone who opened this wants the
     // allocation, and the cap is the answer they would tap toward anyway.
     quantity: maxPerWallet ?? 1,

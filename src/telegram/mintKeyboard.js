@@ -19,6 +19,11 @@ import { usdSuffix } from "../mint/nativePrice.js";
 
 const fmt = (wei) => (wei == null ? "unknown" : `${Number(formatEther(wei))}`);
 
+// Trims float noise without hiding small numbers. A 24h volume of
+// 1.0954746427387252 is a float artefact rendered as precision nobody asked
+// for; a floor of 0.000042 still needs its digits.
+const eth = (n) => (n == null ? "?" : n >= 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : Number(n.toPrecision(3)).toString());
+
 function fmtWhen(date) {
   if (!date) return null;
   const ms = date.getTime() - Date.now();
@@ -94,6 +99,30 @@ export function buildMintConfigText(config) {
     lines.push(`• Wallet: ${balEth.toFixed(5)} ETH${balUsd}${short ? " ⚠️ *not enough — fund this wallet*" : ""}`);
   }
   lines.push(`• Wallets loaded: ${walletsAvailable}`);
+
+  // Market data, when the collection has traded enough to have any. A drop
+  // minutes old has none of this and the section simply does not appear —
+  // showing "floor: unknown" on something that has never had a floor is
+  // noise, not information.
+  const s = config.stats;
+  const hasMarket = s && (s.floorPriceEth != null || s.volume24hEth != null || s.numOwners != null);
+  if (hasMarket) {
+    lines.push("", "📊 *Market*");
+    if (s.floorPriceEth != null) lines.push(`• Floor: *${eth(s.floorPriceEth)} ETH*${usdSuffix(s.floorPriceEth, config.ethUsd)}`);
+    if (s.volume24hEth != null) lines.push(`• 24h volume: ${eth(s.volume24hEth)} ETH${usdSuffix(s.volume24hEth, config.ethUsd)}`);
+    if (s.numOwners != null) lines.push(`• Owners: ${s.numOwners}${s.totalSales != null ? ` · ${s.totalSales} sales` : ""}`);
+  }
+
+  // The cheapest listing is what you would actually pay, which is not always
+  // the floor OpenSea reports — the floor is a statistic, this is an order
+  // that exists right now and can be filled.
+  if (config.listing?.priceEth != null) {
+    lines.push(
+      "",
+      `🛒 *Cheapest listing: ${eth(config.listing.priceEth)} ETH*${usdSuffix(config.listing.priceEth, config.ethUsd)}` +
+        `${config.listing.tokenId ? ` — #${config.listing.tokenId}` : ""}`
+    );
+  }
 
   // Anything that would stop the mint goes ABOVE the buttons. Someone about
   // to tap CONFIRM should already know it cannot work.
@@ -189,4 +218,23 @@ export function mintConfigKeyboard(config) {
     [Markup.button.callback("⏰ Schedule auto-mint when live", "mint:schedule")],
     [Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")],
   ]);
+}
+
+/**
+ * Controls for a collection whose mint is over.
+ *
+ * "Too late" is not a useful answer on its own. Once minting has finished the
+ * secondary market IS the way in, so the same card that reports the mint
+ * closed also offers to fill the cheapest listing.
+ *
+ * Buying is offered only when a real order exists. A button that opens a flow
+ * ending in "there is nothing to buy" wastes the tap and the round trip.
+ */
+export function secondaryKeyboard(config) {
+  const rows = [];
+  if (config.listing?.priceEth != null) {
+    rows.push([Markup.button.callback(`🛒 BUY floor — ${eth(config.listing.priceEth)} ETH`, "mint:buyfloor")]);
+  }
+  rows.push([Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")]);
+  return Markup.inlineKeyboard(rows);
 }

@@ -1,10 +1,7 @@
 import { CHAINS } from "./chains.js";
 import { getActiveChainDefs, setChainEnabled, loadEnabledChains } from "./chainSettings.js";
 import { isPaused } from "./botState.js";
-import { startPairWatcher } from "./watchers/pairWatcher.js";
-import { startPollingWatcher } from "./watchers/pollingWatcher.js";
-import { evaluateToken } from "./pipeline.js";
-import { addPending, countPending, countSeen, countCalled, countCalledNft } from "./store/db.js";
+import { countPending, countSeen, countCalled, countCalledNft } from "./store/db.js";
 import { createBot } from "./telegram/bot.js";
 import { startMilestoneChecker, startWatchlistDigest } from "./priceUpdater.js";
 import { startRecheckQueue } from "./recheckQueue.js";
@@ -43,27 +40,6 @@ const stats = {
   get nftCalled() { return countCalledNft(); },
 };
 
-async function handleNewToken({ chain, dexName, pairAddress, tokenAddress, timestamp }) {
-  if (isPaused()) return;
-  console.log(`[${chain.key}/${dexName}] new pair ${pairAddress} → token ${tokenAddress}`);
-
-  try {
-    const result = await evaluateToken(bot, { chain, dexName, pairAddress, tokenAddress, ageMinutes: 0 });
-
-    if (result.pass) {
-      console.log(`[${chain.key}] called ${result.symbol || "?"} (${tokenAddress}) — score ${result.riskResult.score}`);
-      return;
-    }
-
-    if (result.reasons.includes("Already called")) return; // e.g. the same token seen via a second DEX pair
-
-    console.log(`[${chain.key}] ${tokenAddress} not yet passing: ${result.reasons.join("; ")} — queued for recheck`);
-    addPending({ chain: chain.key, tokenAddress, pairAddress, dexName, firstSeenAt: timestamp });
-  } catch (err) {
-    console.error(`[${chain.key}] failed to process ${tokenAddress}:`, err.message);
-  }
-}
-
 async function handleNewNftCollection({ chain, contractAddress }) {
   if (isPaused()) return;
   console.log(`[${chain.key}] new NFT collection ${contractAddress}`);
@@ -99,13 +75,23 @@ async function handleWalletNftBuy({ chain, walletAddress, contractAddress, price
 // and stop dynamically instead of being fixed at boot.
 const activeWatchers = new Map(); // chainKey -> stop function
 
+// THIS BOT DOES NOT WATCH TOKENS.
+//
+// It was seeded from the token bot's repo and the token pipeline came along
+// with it. Nothing starts a token watcher at boot, but the path was still
+// live: the ⛓ Chains menu is off the main keyboard, yet its callback data
+// survives in any older message, and one tap would have started pair
+// watching, run evaluateToken, and written token calls into this bot's
+// database — including pipeline.js's recordDeployerOutcome, the circular
+// scorer feedback that the NFT side was deliberately moved off.
+//
+// Refused here rather than by deleting the token modules: they are imported
+// by shared infrastructure (explorer.js, db.js) that the NFT side genuinely
+// uses, so removing them is a much larger change than the leak warrants. The
+// chain toggle still persists its setting, so nothing in the UI breaks — it
+// simply cannot bring a token watcher up.
 function startChainWatcher(chainKey) {
-  if (activeWatchers.has(chainKey)) return;
-  const chainDef = CHAINS[chainKey];
-  if (!chainDef) return;
-  const chain = { key: chainKey, ...chainDef };
-  const stop = chainDef.pollingOnly ? startPollingWatcher(chain, handleNewToken) : startPairWatcher(chain, handleNewToken);
-  activeWatchers.set(chainKey, stop);
+  console.log(`[index] refusing to start a token watcher for ${chainKey} — this is the NFT mint bot`);
 }
 
 function stopChainWatcher(chainKey) {
@@ -146,16 +132,18 @@ startMintScheduler({
 // trading bot, and nothing token-related starts here.
 //
 // The repo was seeded from the token bot's tree, so those modules are still
-// present on disk and still imported above — but the token pair watchers,
-// recheck queue, milestone/track updaters, paper- and real-trade checkers
-// and stale-price rug check are all deliberately NOT started. Left running,
-// this process would evaluate token launches and post token calls into the
-// NFT bot's Telegram chat, which is not what this bot is for.
+// present on disk — but the pair watchers and the token pipeline are no
+// longer imported here at all, and the recheck queue, milestone/track
+// updaters, paper- and real-trade checkers and stale-price rug check are
+// deliberately not started. Left running, this process would evaluate token
+// launches and post token calls into the NFT bot's Telegram chat, which is
+// not what this bot is for.
 //
-// The token modules stay imported rather than deleted because bot.js still
-// renders the shared menus that reference them; pruning that is a separate
-// job from making sure none of it RUNS. If a token watcher ever needs to
-// come back, it belongs in the other bot, not here.
+// The remaining token modules stay on disk rather than being deleted because
+// bot.js still renders the shared menus that reference them, and because
+// explorer.js and db.js are genuinely shared with the NFT side. Pruning that
+// is a separate job from making sure none of it RUNS. If a token watcher ever
+// needs to come back, it belongs in the other bot, not here.
 
 // NFT support lives entirely behind OPENSEA_API_KEY being configured —
 // with no key, none of this starts and the rest of the bot behaves exactly

@@ -127,6 +127,34 @@ export async function simulateMint(chain, call, from) {
 // Everything above this line is read-only. Everything below spends ETH.
 
 
+
+/**
+ * The most specific error text available, not the most convenient.
+ *
+ * ethers wraps a JSON-RPC failure it cannot classify as "could not coalesce
+ * error", which says nothing and hides a message the node did send. Reporting
+ * that verbatim to someone whose mint just failed tells them only that
+ * something went wrong — the node usually said exactly what.
+ *
+ * Digs through the nesting ethers uses, in order of specificity, and falls
+ * back to the wrapper only when there is genuinely nothing better.
+ */
+export function describeSendError(err) {
+  const nested =
+    err?.error?.message ??
+    err?.info?.error?.message ??
+    err?.info?.responseBody ??
+    err?.cause?.error?.message ??
+    err?.cause?.message ??
+    null;
+
+  const base = err?.shortMessage ?? err?.message ?? "unknown error";
+  if (!nested) return base;
+  const text = String(nested).slice(0, 200);
+  // When the wrapper is uninformative, lead with what the node said.
+  return /coalesce|unknown error/i.test(base) ? text : `${base} — ${text}`;
+}
+
 /**
  * Mints across the first `walletCount` wallets in the roster.
  *
@@ -210,7 +238,7 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
           const estimate = await provider.estimateGas({ ...call, from: address });
           gasLimit = (estimate * BigInt(Math.round(settings.gasLimitMultiplier * 100))) / 100n;
         } catch (err) {
-          return { address, ok: false, stage: "estimate", reason: err.shortMessage || err.message };
+          return { address, ok: false, stage: "estimate", reason: describeSendError(err) };
         }
 
         // Everything above this line is free. The next statement is not.
@@ -221,7 +249,7 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
         const tx = await wallet.sendTransaction({ ...call, gasLimit, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
         return { address, ok: true, stage: "sent", txHash: tx.hash, valueWei: call.value };
       } catch (err) {
-        return { address, ok: false, stage: "send", reason: err.shortMessage || err.message };
+        return { address, ok: false, stage: "send", reason: describeSendError(err) };
       }
     })
   );
@@ -377,7 +405,7 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
         const tx = await provider.broadcastTransaction(s.raw);
         return { address: s.address, ok: true, stage: "sent", txHash: tx.hash, valueWei: s.valueWei, sendMs: Date.now() - t0 };
       } catch (err) {
-        const reason = err.shortMessage || err.message;
+        const reason = describeSendError(err);
         if (!isNonceError(reason) || !call) {
           return { address: s.address, ok: false, stage: "broadcast", reason };
         }
@@ -397,7 +425,7 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
             valueWei: s.valueWei, sendMs: Date.now() - t0, note: `nonce moved (${s.nonce} -> ${nonce}), re-signed`,
           };
         } catch (err2) {
-          return { address: s.address, ok: false, stage: "resign", reason: err2.shortMessage || err2.message };
+          return { address: s.address, ok: false, stage: "resign", reason: describeSendError(err2) };
         }
       }
     })

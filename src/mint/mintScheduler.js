@@ -1,6 +1,6 @@
 import { CHAINS } from "../chains.js";
 import { detectNftMint } from "./nftMintDetect.js";
-import { executeMint, buildMintCall } from "./nftMintExecutor.js";
+import { prepareSignedMints, broadcastSigned } from "./nftMintExecutor.js";
 
 // Fires a mint the moment its phase opens.
 //
@@ -79,17 +79,33 @@ export function listArmedMints() {
 async function prepare(entry, notify) {
   const chain = { key: entry.chainKey, ...CHAINS[entry.chainKey] };
   try {
+    // Re-read: a creator can rewrite the public drop right up to the open,
+    // and this was observed live — a drop's advertised price and per-wallet
+    // cap both changed within a day. Minting against what was armed would be
+    // a guaranteed revert.
     const detect = await detectNftMint(chain, entry.contractAddress, { budgetMs: 8000 });
-    const call = await buildMintCall(chain, {
-      detect, contractAddress: entry.contractAddress,
-      quantity: entry.quantity, priceOverrideWei: entry.priceOverrideWei,
-    });
     entry.detect = detect;
-    entry.prepared = { call, preparedAt: Date.now() };
-
-    // If the phase moved while we waited, follow it rather than firing at a
-    // time that no longer means anything.
     if (detect.phase?.startsAt) entry.startsAtMs = detect.phase.startsAt.getTime();
+
+    // Sign here, not at fire. Nonce, fee data, gas estimate and signature are
+    // all knowable in advance and together cost ~2.5s against this RPC —
+    // spent now, while nothing is happening, so firing is one round trip.
+    const prep = await prepareSignedMints(chain, {
+      detect,
+      contractAddress: entry.contractAddress,
+      quantity: entry.quantity,
+      priceOverrideWei: entry.priceOverrideWei,
+      walletCount: entry.walletCount,
+    });
+
+    if (!prep.ok) {
+      entry.prepared = null;
+      await notify?.(entry.chatId, `⚠️ Couldn't prepare \`${entry.contractAddress}\`: ${prep.reason ?? prep.signed.map((x) => x.reason).filter(Boolean).join("; ")}`);
+      return;
+    }
+    entry.prepared = { signed: prep.signed, preparedAt: Date.now() };
+    const ready = prep.signed.filter((x) => x.ok).length;
+    await notify?.(entry.chatId, `🔧 Prepared ${ready} signed transaction(s) for \`${entry.contractAddress}\` — firing at the open.`);
   } catch (err) {
     entry.prepared = null;
     await notify?.(entry.chatId, `⚠️ Couldn't prepare the scheduled mint for \`${entry.contractAddress}\`: ${err.message}`);
@@ -99,19 +115,30 @@ async function prepare(entry, notify) {
 async function fire(entry, notify) {
   entry.fired = true;
   const chain = { key: entry.chainKey, ...CHAINS[entry.chainKey] };
+  const t0 = Date.now();
   try {
-    const result = await executeMint(chain, {
-      detect: entry.detect,
-      contractAddress: entry.contractAddress,
-      quantity: entry.quantity,
-      priceOverrideWei: entry.priceOverrideWei,
-      walletCount: entry.walletCount,
-    });
-    const sent = result.results.filter((r) => r.ok);
-    const failed = result.results.filter((r) => !r.ok);
+    // Nothing is prepared if preparation failed. Firing anyway would mean
+    // doing every slow step at the worst possible moment, so it reports
+    // instead — a missed mint is better than a mint that arrives late AND
+    // reverts.
+    if (!entry.prepared) {
+      await notify?.(entry.chatId, `⛔️ \`${entry.contractAddress}\` opened but nothing was prepared — not firing.`);
+      return;
+    }
+
+    const results = await broadcastSigned(chain, entry.prepared.signed);
+    const elapsed = Date.now() - t0;
+    const sent = results.filter((r) => r.ok);
+    const failed = results.filter((r) => !r.ok);
+    const dry = sent.some((r) => r.stage === "dry-run");
+
     const lines = [
-      result.ok ? `🚀 *Scheduled mint fired* — ${entry.contractAddress}` : `⛔️ *Scheduled mint did not send* — ${result.reason ?? "all wallets failed"}`,
-      ...sent.map((r) => `  ✅ \`${r.address.slice(0, 10)}…\` ${r.txHash}`),
+      !sent.length
+        ? `⛔️ *Scheduled mint failed* — ${entry.contractAddress}`
+        : dry
+          ? `🧪 *Scheduled dry run* — ${sent.length} would have fired in ${elapsed}ms`
+          : `🚀 *Scheduled mint fired* in ${elapsed}ms — ${entry.contractAddress}`,
+      ...sent.map((r) => (r.stage === "dry-run" ? `  ✅ \`${r.address.slice(0, 10)}…\` (dry run)` : `  ✅ \`${r.address.slice(0, 10)}…\` \`${r.txHash}\` (${r.sendMs}ms)`)),
       ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
     ];
     await notify?.(entry.chatId, lines.join("\n"));

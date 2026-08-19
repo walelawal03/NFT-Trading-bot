@@ -1,5 +1,6 @@
 {
   "enabled": false,
+  "dryRun": true,
   "maxSpendEthPerRun": 0.05,
   "gasLimitMultiplier": 1.3,
   "requireSimulation": true

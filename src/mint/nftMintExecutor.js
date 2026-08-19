@@ -255,3 +255,103 @@ export async function findMaxMintable(chain, { detect, contractAddress, priceOve
   }
   return lo;
 }
+
+/**
+ * Does everything except broadcast, and returns signed raw transactions.
+ *
+ * This is what makes a scheduled mint fast. Measured against Robinhood's
+ * public RPC, a fired mint that still has to fetch a nonce, fetch fee data,
+ * estimate gas and sign pays ~2.5s before the send even starts. Every one of
+ * those is knowable in advance, so the scheduler does them while waiting and
+ * fire becomes a single eth_sendRawTransaction — one round trip, which
+ * measured 573ms at best on this endpoint. That round trip is the floor; no
+ * amount of preparation gets under it.
+ *
+ * Two things go stale between preparing and firing, and both are deliberate
+ * trade-offs rather than oversights:
+ *
+ *   nonce — signed in, so any OTHER transaction from the same wallet in the
+ *           gap invalidates it. Acceptable for a wallet whose only job is
+ *           minting; not acceptable for one you also trade from.
+ *   fee   — priced at prepare time and padded, because a launch is exactly
+ *           when the base fee spikes. Underpriced is worse than overpaid: it
+ *           sits unmined while the drop fills.
+ */
+export async function prepareSignedMints(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, feeMultiplier = 2 }) {
+  const settings = loadMintExecutionSettings();
+  if (!settings.enabled) return { ok: false, reason: "Mint execution is disabled.", signed: [] };
+
+  const keys = loadMintWalletSigningKeys().slice(0, walletCount);
+  if (keys.length === 0) return { ok: false, reason: "No wallets imported.", signed: [] };
+
+  const unitPriceWei = priceOverrideWei ?? detect.phase?.priceWei ?? null;
+  if (unitPriceWei == null) return { ok: false, reason: "Unit price unknown.", signed: [] };
+
+  const totalWei = unitPriceWei * BigInt(quantity) * BigInt(keys.length);
+  const ceilingWei = parseEther(String(settings.maxSpendEthPerRun));
+  if (totalWei > ceilingWei) {
+    return { ok: false, reason: `Would spend ${formatEther(totalWei)} ETH, over the ${settings.maxSpendEthPerRun} ETH ceiling.`, signed: [] };
+  }
+
+  const provider = getProvider(chain);
+  const call = await buildMintCall(chain, { detect, contractAddress, quantity, priceOverrideWei });
+  const [fee, network] = await Promise.all([provider.getFeeData(), provider.getNetwork()]);
+
+  const mult = BigInt(Math.max(1, Math.round(feeMultiplier)));
+  const gasPrice = (fee.gasPrice ?? 0n) * mult;
+
+  const signed = await Promise.all(
+    keys.map(async (privateKey) => {
+      const wallet = new Wallet(privateKey, provider);
+      const address = wallet.address;
+      try {
+        if (settings.requireSimulation) {
+          const sim = await simulateMint(chain, call, address);
+          if (!sim.ok) return { address, ok: false, stage: "simulate", reason: sim.reason };
+        }
+        const [nonce, estimate] = await Promise.all([
+          provider.getTransactionCount(address, "pending"),
+          provider.estimateGas({ ...call, from: address }),
+        ]);
+        const gasLimit = (estimate * BigInt(Math.round(settings.gasLimitMultiplier * 100))) / 100n;
+
+        const raw = await wallet.signTransaction({
+          ...call, nonce, gasLimit, gasPrice, chainId: network.chainId, type: 0,
+        });
+        return { address, ok: true, raw, nonce, gasLimit, gasPrice, valueWei: call.value };
+      } catch (err) {
+        return { address, ok: false, stage: "prepare", reason: err.shortMessage || err.message };
+      }
+    })
+  );
+
+  return { ok: signed.some((s) => s.ok), reason: null, signed, call };
+}
+
+/**
+ * Fires pre-signed transactions. One round trip each, all at once.
+ *
+ * No reads, no building, no signing — by the time this runs there is nothing
+ * left to decide. Concurrent because the wallets are independent and the gap
+ * between first and last is the gap between minting and not.
+ */
+export async function broadcastSigned(chain, signed) {
+  const settings = loadMintExecutionSettings();
+  const provider = getProvider(chain);
+  const ready = signed.filter((s) => s.ok);
+
+  return Promise.all(
+    ready.map(async (s) => {
+      if (settings.dryRun) {
+        return { address: s.address, ok: true, stage: "dry-run", valueWei: s.valueWei, gasLimit: s.gasLimit };
+      }
+      try {
+        const t0 = Date.now();
+        const tx = await provider.broadcastTransaction(s.raw);
+        return { address: s.address, ok: true, stage: "sent", txHash: tx.hash, valueWei: s.valueWei, sendMs: Date.now() - t0 };
+      } catch (err) {
+        return { address: s.address, ok: false, stage: "broadcast", reason: err.shortMessage || err.message };
+      }
+    })
+  );
+}

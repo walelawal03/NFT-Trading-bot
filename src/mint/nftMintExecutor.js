@@ -214,3 +214,44 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
 
   return { ok: results.some((r) => r.ok), reason: null, results, call };
 }
+
+/**
+ * The largest quantity that actually simulates, at or below `maxQuantity`.
+ *
+ * The advertised cap is not always mintable. Observed live on KITTIHOOD
+ * (0x4804547f..., Robinhood): getPublicDrop reports
+ * maxTotalMintableByWallet = 6, the wallet had minted 0 of them, and
+ * quantities 1-5 simulate fine while 6 reverts — reproducibly, from a funded
+ * wallet, on a free mint. Whatever the contract's own reason, the advertised
+ * number was wrong and only simulating found it.
+ *
+ * So SWEEP means "the most that works", not "the most they claim". Binary
+ * search rather than stepping down one at a time, because some drops
+ * advertise caps in the thousands and each probe is a round trip.
+ */
+export async function findMaxMintable(chain, { detect, contractAddress, priceOverrideWei = null, from, maxQuantity }) {
+  const ceiling = Math.max(1, maxQuantity);
+
+  const works = async (qty) => {
+    try {
+      const call = await buildMintCall(chain, { detect, contractAddress, quantity: qty, priceOverrideWei });
+      return (await simulateMint(chain, call, from)).ok;
+    } catch {
+      return false;
+    }
+  };
+
+  // The common case is that the advertised cap is right — check it first so a
+  // well-behaved drop costs one probe instead of a whole search.
+  if (await works(ceiling)) return ceiling;
+  if (!(await works(1))) return 0;
+
+  let lo = 1; // known good
+  let hi = ceiling; // known bad
+  while (hi - lo > 1) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (await works(mid)) lo = mid;
+    else hi = mid;
+  }
+  return lo;
+}

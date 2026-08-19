@@ -78,7 +78,7 @@ import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget } from "./handlePaste.js";
-import { executeMint } from "../mint/nftMintExecutor.js";
+import { executeMint, findMaxMintable } from "../mint/nftMintExecutor.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
 import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
@@ -2863,8 +2863,30 @@ export function createBot(stats, chainControls, digestControls) {
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — paste the address again.");
 
-    const quantity = sweep ? (config.detect.phase?.maxPerWallet ?? config.quantity) : config.quantity;
     const walletCount = Math.max(config.wallets, 1);
+
+    // SWEEP means the most that actually mints, not the most advertised.
+    // getPublicDrop's cap has been observed to be unmintable (KITTIHOOD:
+    // claims 6, reverts at 6, fine at 5), so sweep probes for the real
+    // ceiling instead of walking into that revert.
+    let quantity = config.quantity;
+    if (sweep) {
+      const wallets = listMintWallets();
+      if (wallets.length === 0) return ctx.reply("No wallets imported.");
+      await ctx.reply("Finding the largest quantity that actually mints…");
+      quantity = await findMaxMintable(config.chain, {
+        detect: config.detect,
+        contractAddress: config.contractAddress,
+        priceOverrideWei: config.priceOverrideWei,
+        from: wallets[0].address,
+        maxQuantity: config.detect.phase?.maxPerWallet ?? config.quantity,
+      });
+      if (quantity === 0) return ctx.reply("⛔️ Nothing mintable from this wallet right now — even a quantity of 1 reverts.");
+      const advertised = config.detect.phase?.maxPerWallet;
+      if (advertised && quantity < advertised) {
+        await ctx.reply(`ℹ️ Contract advertises ${advertised} per wallet but only ${quantity} actually mints. Using ${quantity}.`);
+      }
+    }
 
     await ctx.reply(`Sending ${quantity} x ${walletCount} wallet(s)…`);
     try {

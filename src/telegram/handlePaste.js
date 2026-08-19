@@ -2,7 +2,7 @@ import { CHAINS } from "../chains.js";
 import { getNftChainKeys } from "../nftChains.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard, MINT_CARD_EXTRA } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 
 // Paste a contract address or a mint link; get mint options. No command.
@@ -49,6 +49,18 @@ export function parsePastedTarget(text) {
 // path deliberately: a link that already contains an address never waits on
 // OpenSea, because the whole reason this bot reads chains directly is that
 // aggregators are slow and often have not indexed a new drop at all.
+// Contract -> OpenSea slug, for the preview card only. Short-circuits to null
+// on any failure: an unindexed drop is the normal case here, not an error.
+async function resolveSlugForContract(chainKey, contractAddress) {
+  try {
+    const { getContract } = await import("../risk/opensea.js");
+    const info = await getContract(chainKey, contractAddress);
+    return info?.slug ?? null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveSlug(slug) {
   const { getCollection } = await import("../risk/opensea.js");
   const collection = await getCollection(slug).catch(() => null);
@@ -118,8 +130,19 @@ export async function handlePastedTarget(ctx, text) {
       // scrolled back to before tapping. Only fall back to the standalone
       // report when there are no controls to show.
       if (detect.mintVia) {
-        const config = mintSession.startSession(ctx.chat.id, { chain, contractAddress: target.address, detect });
-        await ctx.reply(buildMintConfigText(config), { ...MINT_CARD_EXTRA, ...mintConfigKeyboard(config) });
+        // Slug is only for the link preview — the OpenSea collection page
+        // renders a proper card (image, floor, item count) where the bare
+        // asset path does not. Deliberately best-effort and last: it is the
+        // one OpenSea call in this flow, and a fresh drop OpenSea has not
+        // indexed must still get its card without waiting on a miss.
+        const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
+        const config = mintSession.startSession(ctx.chat.id, {
+          chain,
+          contractAddress: target.address,
+          detect,
+          openseaSlug,
+        });
+        await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });
       } else {
         await ctx.reply(buildMintDetectMessage({ chain, contractAddress: target.address, detect }), {
           parse_mode: "Markdown",

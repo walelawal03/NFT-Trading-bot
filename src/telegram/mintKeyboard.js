@@ -87,26 +87,47 @@ export function buildMintConfigText(config) {
   if (unit == null) blockers.push("price unknown");
   if (blockers.length) lines.push("", `⛔️ *Can't mint:* ${blockers.join(", ")}`);
 
-  // OpenSea first — it is what you actually want to look at for a drop, and
-  // the explorer is the fallback for a collection OpenSea has not indexed
-  // (which, for a mint this bot cares about, is most of them at first).
-  //
-  // Send this with link previews DISABLED. Telegram expands the first link
-  // into a preview card, and the explorer's card is a wall of grey text that
-  // pushed the mint buttons off the bottom of the screen.
   const explorer = explorerUrlFor(chain.key, contractAddress);
-  const opensea = `https://opensea.io/assets/${openseaChainSlug(chain.key)}/${contractAddress}`;
   lines.push(
     "",
     `\`${contractAddress}\``,
-    [`[OpenSea](${opensea})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
+    [`[OpenSea](${openseaUrlFor(config)})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
   );
 
   return lines.join("\n");
 }
 
-// Pass this alongside parse_mode wherever the mint card is sent or edited.
-export const MINT_CARD_EXTRA = { parse_mode: "Markdown", link_preview_options: { is_disabled: true } };
+// The collection page when the slug is known, the asset path otherwise. The
+// slug URL is the one that previews properly — image, floor, item count —
+// which is the whole reason to resolve it.
+export function openseaUrlFor(config) {
+  return config.openseaSlug
+    ? `https://opensea.io/collection/${config.openseaSlug}`
+    : `https://opensea.io/assets/${openseaChainSlug(config.chain.key)}/${config.contractAddress}`;
+}
+
+/**
+ * Preview options for the mint card.
+ *
+ * Telegram previews the FIRST link it finds unless told otherwise, which
+ * meant the explorer — a wall of grey text that pushed the mint buttons off
+ * the bottom of a phone screen. Naming the URL explicitly picks the OpenSea
+ * card instead: image, floor price, item count, the thing actually worth
+ * looking at.
+ *
+ * show_above_text puts it above the details rather than between them and the
+ * keyboard, so the controls stay directly under the numbers they act on.
+ */
+export function mintCardExtra(config) {
+  return {
+    parse_mode: "Markdown",
+    link_preview_options: {
+      url: openseaUrlFor(config),
+      prefer_large_media: true,
+      show_above_text: true,
+    },
+  };
+}
 
 export function mintConfigKeyboard(config) {
   const { detect } = config;

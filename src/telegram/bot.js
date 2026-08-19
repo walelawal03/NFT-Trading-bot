@@ -75,7 +75,7 @@ import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftD
 import { buildNftScanMessage } from "./formatNftScan.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
-import { buildMintConfigText, mintConfigKeyboard, MINT_CARD_EXTRA } from "./mintKeyboard.js";
+import { buildMintConfigText, mintConfigKeyboard, mintCardExtra } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
 import { handlePastedTarget } from "./handlePaste.js";
 import { executeMint, findMaxMintable } from "../mint/nftMintExecutor.js";
@@ -2827,7 +2827,7 @@ export function createBot(stats, chainControls, digestControls) {
   // always the ones a mint would use. Nothing here signs or sends.
   const redrawMint = async (ctx, config) => {
     if (!config) return ctx.answerCbQuery("That mint session expired — run /mint again.");
-    await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), MINT_CARD_EXTRA);
+    await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), mintCardExtra(config));
   };
 
   bot.action("mint:noop", (ctx) => ctx.answerCbQuery());
@@ -2847,7 +2847,7 @@ export function createBot(stats, chainControls, digestControls) {
         contractAddress: current.contractAddress,
         detect,
       });
-      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), MINT_CARD_EXTRA);
+      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), mintCardExtra(config));
     } catch (err) {
       await ctx.reply(`Couldn't refresh: ${err.message}`);
     }

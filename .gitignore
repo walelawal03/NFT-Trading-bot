@@ -7,3 +7,7 @@ data/walletSettings.json
 *.log
 .DS_Store
 data/mintWallets.json
+
+# Runtime holdings record. Machine-local state, and it maps burner addresses
+# to what they hold — the same reason mintWallets.json is not tracked.
+data/nftHoldings.json

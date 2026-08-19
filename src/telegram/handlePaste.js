@@ -77,6 +77,31 @@ export async function loadCardExtras(chain, { slug = null, contractAddress = nul
   return { walletBalanceWei, ethUsd, stats, listing };
 }
 
+/**
+ * Simulates mint-then-exit for the card.
+ *
+ * Fails to null rather than throwing: a drop we could not probe still gets a
+ * card. The card renders "not verified" in that case, which is the honest
+ * answer — omitting the line entirely would read as a pass.
+ *
+ * Runs concurrently with loadCardExtras at the call site, so its ~200ms
+ * overlaps the OpenSea round trips and costs no wall clock.
+ */
+export async function loadRoundTrip(chain, { detect, contractAddress }) {
+  if (!detect?.mintVia) return null;
+  try {
+    const { buildMintCall } = await import("../mint/nftMintExecutor.js");
+    const { probeNftRoundTrip } = await import("../risk/nftRoundTripProbe.js");
+    // Quantity 1 regardless of what the user goes on to configure: the
+    // question is whether a token from this collection can leave a wallet at
+    // all, and that does not change with quantity.
+    const mintCall = await buildMintCall(chain, { detect, contractAddress, quantity: 1 });
+    return await probeNftRoundTrip(chain, { mintCall, contractAddress });
+  } catch {
+    return null;
+  }
+}
+
 // Contract -> OpenSea slug, for the preview card only. Short-circuits to null
 // on any failure: an unindexed drop is the normal case here, not an error.
 async function resolveSlugForContract(chainKey, contractAddress) {
@@ -174,12 +199,19 @@ export async function handlePastedTarget(ctx, text) {
         // one OpenSea call in this flow, and a fresh drop OpenSea has not
         // indexed must still get its card without waiting on a miss.
         const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
-        const extras = await loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address });
+        // Concurrent: the exit probe is one eth_call and the extras are
+        // OpenSea round trips, so overlapping them makes the probe free in
+        // wall-clock terms. Neither can fail the card.
+        const [extras, roundTrip] = await Promise.all([
+          loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address }),
+          loadRoundTrip(chain, { detect, contractAddress: target.address }),
+        ]);
         const config = mintSession.startSession(ctx.chat.id, {
           chain,
           contractAddress: target.address,
           detect,
           openseaSlug,
+          roundTrip,
           ...extras,
         });
         await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });

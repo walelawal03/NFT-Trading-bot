@@ -20,7 +20,7 @@ export { countMintWallets as walletCount } from "./mintWallets.js";
 // zero, and defaulting unknown to 0 would make every such drop unmintable.
 const clamp = (n, min, max) => Math.max(min, max == null ? n : Math.min(n, max));
 
-export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null, stats = null, listing = null }) {
+export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null, stats = null, listing = null, roundTrip = null }) {
   const maxPerWallet = detect.phase?.maxPerWallet ?? null;
   const walletCount = countMintWallets();
 
@@ -41,6 +41,12 @@ export function startSession(chatId, { chain, contractAddress, detect, openseaSl
     // live listing. Display, plus the price the buy button fills at.
     stats,
     listing,
+    // Result of the mint-then-exit simulation (risk/nftRoundTripProbe.js).
+    // Display and warning only — it deliberately does NOT block the mint
+    // button. A probe that could not run must never be able to stop a mint,
+    // and an exit that is blocked today is still someone's call to make with
+    // their own money. It is shown loudly and left as a decision.
+    roundTrip,
     // Start at the cap rather than 1: someone who opened this wants the
     // allocation, and the cap is the answer they would tap toward anyway.
     quantity: maxPerWallet ?? 1,

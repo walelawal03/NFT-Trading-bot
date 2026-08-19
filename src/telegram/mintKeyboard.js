@@ -112,11 +112,18 @@ export function buildMintConfigText(config) {
   // showing "floor: unknown" on something that has never had a floor is
   // noise, not information.
   const s = config.stats;
-  const hasMarket = s && (s.floorPriceEth != null || s.volume24hEth != null || s.numOwners != null);
+  // Zero is absence, not a value, and usdSuffix renders it as "(free)" — so
+  // an unsold drop was reporting "Floor: 0 ETH (free)" and "24h volume: 0 ETH
+  // (free)", which reads as a price rather than as the silence it is. Same
+  // guard, same reason, as the mint result card and the list-at-floor button:
+  // a zero floor is what OpenSea returns when nothing is listed.
+  const floor = s?.floorPriceEth > 0 ? s.floorPriceEth : null;
+  const vol24h = s?.volume24hEth > 0 ? s.volume24hEth : null;
+  const hasMarket = s && (floor != null || vol24h != null || s.numOwners != null);
   if (hasMarket) {
     lines.push("", "📊 *Market*");
-    if (s.floorPriceEth != null) lines.push(`• Floor: *${eth(s.floorPriceEth)} ETH*${usdSuffix(s.floorPriceEth, config.ethUsd)}`);
-    if (s.volume24hEth != null) lines.push(`• 24h volume: ${eth(s.volume24hEth)} ETH${usdSuffix(s.volume24hEth, config.ethUsd)}`);
+    if (floor != null) lines.push(`• Floor: *${eth(floor)} ETH*${usdSuffix(floor, config.ethUsd)}`);
+    if (vol24h != null) lines.push(`• 24h volume: ${eth(vol24h)} ETH${usdSuffix(vol24h, config.ethUsd)}`);
     if (s.numOwners != null) lines.push(`• Owners: ${s.numOwners}${s.totalSales != null ? ` · ${s.totalSales} sales` : ""}`);
   }
 
@@ -129,6 +136,21 @@ export function buildMintConfigText(config) {
       `🛒 *Cheapest listing: ${eth(config.listing.priceEth)} ETH*${usdSuffix(config.listing.priceEth, config.ethUsd)}` +
         `${config.listing.tokenId ? ` — #${config.listing.tokenId}` : ""}`
     );
+  }
+
+  // The exit check. Placed directly above the blockers and the buttons,
+  // because "can I get out" is the question a mint card otherwise never
+  // answers — and by the time it matters, it is too late to ask.
+  const exit = config.roundTrip;
+  if (exit) {
+    if (exit.exitable === true) {
+      lines.push("", "🔓 *Exit verified* — simulated mint, approve and sale-path transfer all succeeded");
+    } else if (exit.exitable === false) {
+      lines.push("", `🔒 *EXIT BLOCKED* — ${exit.reason}`);
+    } else if (exit.verdict !== "MINT_FAILED") {
+      // Unknown is stated, never omitted. A silent absence reads as a pass.
+      lines.push("", `❓ _Exit not verified: ${exit.reason}_`);
+    }
   }
 
   // Anything that would stop the mint goes ABOVE the buttons. Someone about

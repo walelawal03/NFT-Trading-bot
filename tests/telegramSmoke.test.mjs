@@ -286,6 +286,29 @@ await t("a price override can never go negative", async () => {
 
 // CONFIRM is wired to the executor now. With execution disabled — the
 // default — it must refuse and must never imply a transaction went out.
+// Caps of 60+ make a stepper unusable, so quantity can be typed. Clamping
+// rather than rejecting matters: someone typing 100 against a cap of 60 wants
+// the most they can have.
+await t("a typed quantity is applied, and clamped to the cap", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  await tap("mint:qty:type");
+  await send("2");
+  assert.equal(mintSession.getSession(CHAT).quantity, 2, "typed value should apply");
+
+  await tap("mint:qty:type");
+  await send("999");
+  assert.equal(mintSession.getSession(CHAT).quantity, 3, "must clamp to the contract's cap, not reject");
+});
+
+await t("a typed quantity rejects nonsense without changing anything", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  const before = mintSession.getSession(CHAT).quantity;
+  await tap("mint:qty:type");
+  const out = texts(await send("abc"));
+  assert.match(out, /whole number/i);
+  assert.equal(mintSession.getSession(CHAT).quantity, before, "a bad entry must leave the config alone");
+});
+
 await t("CONFIRM MINT refuses while execution is disabled, and says so", async () => {
   const { loadMintExecutionSettings, saveMintExecutionSettings } = await import("../src/mint/mintExecutionSettings.js");
   saveMintExecutionSettings({ ...loadMintExecutionSettings(), enabled: false });

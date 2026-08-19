@@ -1612,6 +1612,32 @@ async function handlePendingAction(ctx, pending, text, digestControls) {
     return performIdSell(ctx, pending.id, pct);
   }
 
+  if (pending.type === "mintQuantity" || pending.type === "mintWalletCount") {
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+
+    const n = Number(text.trim());
+    if (!Number.isInteger(n) || n < 1) {
+      return ctx.reply("Send a whole number of 1 or more — tap ⌨️ again to retry.");
+    }
+
+    // Clamp rather than reject. Someone typing 100 against a cap of 60 wants
+    // the most they can have, and refusing on a technicality sends them back
+    // to look up a number the bot already knows.
+    const ceiling =
+      pending.type === "mintQuantity" ? config.detect.phase?.maxPerWallet ?? n : countMintWallets();
+    const applied = Math.min(n, ceiling);
+
+    if (pending.type === "mintQuantity") mintSession.setQuantity(ctx.chat.id, applied);
+    else mintSession.setWalletCount(ctx.chat.id, applied);
+
+    const updated = mintSession.getSession(ctx.chat.id);
+    if (applied < n) {
+      await ctx.reply(`${n} is above the maximum of ${ceiling} — using ${applied}.`);
+    }
+    return ctx.reply(buildMintConfigText(updated), { ...mintCardExtra(updated), ...mintConfigKeyboard(updated) });
+  }
+
   if (pending.type === "mintWalletImport") {
     // Scrub before parsing, exactly like walletImportKey below: the key should
     // not linger in chat history whether or not it turned out to be valid.
@@ -2934,6 +2960,24 @@ export function createBot(stats, chainControls, digestControls) {
     } catch (err) {
       await ctx.reply(`Couldn't refresh: ${err.message}`);
     }
+  });
+
+  // Typed entry, because these drops advertise caps of 60 and more.
+  bot.action("mint:qty:type", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    setPending(ctx.chat.id, { type: "mintQuantity" });
+    const max = config.detect.phase?.maxPerWallet;
+    await ctx.reply(`Send the quantity per wallet${max ? ` (1–${max})` : ""}:`);
+  });
+
+  bot.action("mint:wal:type", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    setPending(ctx.chat.id, { type: "mintWalletCount" });
+    await ctx.reply(`Send how many wallets to mint from (1–${countMintWallets()}):`);
   });
 
   bot.action(/^mint:qty:(-?\d+|max)$/, async (ctx) => {

@@ -163,12 +163,17 @@ export function mintConfigKeyboard(config) {
       Markup.button.callback(`✅ ${config.quantity}`, "mint:noop"),
       Markup.button.callback(atMax ? "•" : "+", atMax ? "mint:noop" : "mint:qty:1"),
       Markup.button.callback(max ? `Max (${max})` : "Max", "mint:qty:max"),
+      // Caps run to 60 and beyond on these drops. A stepper alone means
+      // tapping "−" fifty-nine times to get from the cap to 1, which is not a
+      // control, it is a punishment.
+      Markup.button.callback("⌨️", "mint:qty:type"),
     ],
     [Markup.button.callback("💼 Number of wallets", "mint:noop")],
     [
       Markup.button.callback("−", "mint:wal:-1"),
       Markup.button.callback(`✅ ${config.wallets}`, "mint:noop"),
       Markup.button.callback(config.wallets >= walletsAvailable ? "•" : "+", config.wallets >= walletsAvailable ? "mint:noop" : "mint:wal:1"),
+      Markup.button.callback("⌨️", "mint:wal:type"),
     ],
     [Markup.button.callback("💰 Mint price override", "mint:noop")],
     [

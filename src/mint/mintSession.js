@@ -106,3 +106,20 @@ export function totalCostWei(config) {
   if (unit == null) return null;
   return unit * BigInt(config.quantity) * BigInt(Math.max(config.wallets, 1));
 }
+
+// Direct setters for typed entry. Clamping happens at the call site, which
+// knows the ceiling; these only guard the floor so a session can never hold
+// a quantity that means nothing.
+export function setQuantity(chatId, n) {
+  const c = sessions.get(chatId);
+  if (!c) return null;
+  c.quantity = Math.max(1, Math.floor(n));
+  return c;
+}
+
+export function setWalletCount(chatId, n) {
+  const c = sessions.get(chatId);
+  if (!c) return null;
+  c.wallets = Math.max(0, Math.min(Math.floor(n), countMintWallets()));
+  return c;
+}

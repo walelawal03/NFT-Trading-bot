@@ -28,10 +28,10 @@ export async function confirmMint(chain, { txHash, contractAddress, walletAddres
 
   const receipt = await provider.waitForTransaction(txHash, 1, timeoutMs).catch(() => null);
   if (!receipt) {
-    return { ok: null, pending: true, txHash, reason: "Still pending — it may land shortly" };
+    return { ok: null, pending: true, txHash, walletAddress, reason: "Still pending — it may land shortly" };
   }
   if (receipt.status !== 1) {
-    return { ok: false, pending: false, txHash, reason: "Transaction reverted" };
+    return { ok: false, pending: false, txHash, walletAddress, reason: "Transaction reverted" };
   }
 
   // ERC-721 Transfer has 4 topics; the third is the token id. Only transfers
@@ -60,6 +60,11 @@ export async function confirmMint(chain, { txHash, contractAddress, walletAddres
     ok: true,
     pending: false,
     txHash,
+    // Carried through because the wallet that minted is the only one that can
+    // list: these are burners from the mint roster, not the configured main
+    // wallet, and a sell path that forgets which one signs would offer a
+    // listing from an address owning nothing.
+    walletAddress,
     tokenIds,
     balance: balance == null ? null : Number(balance),
     name,

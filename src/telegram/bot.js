@@ -81,9 +81,11 @@ import { handlePastedTarget, loadCardExtras } from "./handlePaste.js";
 import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
 import { buyNftCollectionFloor, listNftForSale } from "../execution/nftExecutor.js";
 import { confirmMint } from "../mint/mintResult.js";
+import { loadHoldings, priceHoldings, recordAcquisition } from "../mint/nftHoldings.js";
+import { buildHoldingsText, holdingsKeyboard, holdingsExtra } from "./formatHoldings.js";
 import { armMint, disarmMint, listArmedMints } from "../mint/mintScheduler.js";
 import { loadMintExecutionSettings, saveMintExecutionSettings } from "../mint/mintExecutionSettings.js";
-import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet } from "../mint/mintWallets.js";
+import { listMintWallets, countMintWallets, importMintWallets, removeMintWallet, signerForMintWallet } from "../mint/mintWallets.js";
 import { getContract } from "../risk/opensea.js";
 import { getNftChainKeys, getNftChainDefs } from "../nftChains.js";
 import { loadNftFilters, saveNftFilters } from "../filters/nftFilter.js";
@@ -437,6 +439,7 @@ function mainMenuKeyboard() {
   // them on the home screen invites using them.
   return Markup.inlineKeyboard([
     [Markup.button.callback(`💼 Mint wallets (${wallets})`, "menu:mintwallets")],
+    [Markup.button.callback("🖼 My NFTs", "menu:holdings")],
     [Markup.button.callback(`${exec.enabled ? "🟢 Minting: ENABLED" : "⚪️ Minting: off"}`, "menu:mintsettings")],
     [Markup.button.callback("⏰ Armed mints", "menu:armed")],
     [Markup.button.callback("🛡 Contract scan", "menu:nftcheck")],
@@ -3112,6 +3115,21 @@ export function createBot(stats, chainControls, digestControls) {
           }).catch(() => ({}));
 
           mintSession.setLastResult(ctx.chat.id, confirmed);
+          // Remember what landed, so "My NFTs" has somewhere to look. The
+          // record is only a candidate list — ownership is re-read from the
+          // chain every time it is displayed — so a stale row here is
+          // harmless, while a missing one would hide a real NFT.
+          if (confirmed.ok && confirmed.tokenIds?.length) {
+            recordAcquisition({
+              chainKey: config.chain.key,
+              contractAddress: config.contractAddress,
+              walletAddress: r.address,
+              tokenIds: confirmed.tokenIds,
+              name: confirmed.name,
+              txHash: r.txHash,
+              pricePaidWei: r.valueWei ?? null,
+            });
+          }
           await ctx.reply(
             buildMintResultText({
               result: confirmed,
@@ -3162,11 +3180,21 @@ export function createBot(stats, chainControls, digestControls) {
       );
     }
 
+    // The minting burner is the offerer, not WALLET_PRIVATE_KEY — it is the
+    // only address that owns these tokens.
+    const sellSigner = result.walletAddress
+      ? await signerForMintWallet(config.chain, result.walletAddress)
+      : null;
+    if (result.walletAddress && !sellSigner) {
+      return ctx.reply(`\`${result.walletAddress}\` is no longer in the mint wallet roster, so there is no key to sign a listing with.`, { parse_mode: "Markdown" });
+    }
+
     await ctx.reply(`Listing ${result.tokenIds.length} token(s) at ${priceEth} ETH…`);
     for (const tokenId of result.tokenIds) {
       try {
         const r = await listNftForSale(config.chain, {
           contractAddress: config.contractAddress,
+          signer: sellSigner,
           tokenId,
           priceEth,
           collectionSlug: config.openseaSlug,
@@ -3177,6 +3205,104 @@ export function createBot(stats, chainControls, digestControls) {
       }
     }
   };
+
+  // ── My NFTs ──────────────────────────────────────────────────────────────
+  //
+  // What the mint wallets hold right now, priced off the floor. Answers the
+  // one question a mint bot leaves open once a mint lands: the NFT went to a
+  // burner from data/mintWallets.json, not to whatever wallet app is on the
+  // phone, so without this view there is nowhere in the bot to see it.
+  //
+  // Ownership is re-read from the chain on every open. The local record only
+  // says where to look — see mint/nftHoldings.js.
+
+  // The keyboard addresses collections by index, so the exact list a button
+  // was drawn against has to survive until it is tapped. Re-deriving it on
+  // click would re-sort as floors move and sell the wrong collection.
+  const lastHoldings = new Map();
+
+  const showHoldings = async (ctx, { edit = false } = {}) => {
+    const loading = edit ? null : await ctx.reply("🖼 Reading your wallets…");
+    try {
+      const holdings = await loadHoldings();
+      // Pricing is best-effort and deliberately after the fact: ownership is
+      // an on-chain fact and must never be withheld because OpenSea is having
+      // a bad minute.
+      await priceHoldings(holdings.groups).catch(() => {});
+      const { getEthUsd } = await import("../mint/nativePrice.js");
+      const ethUsd = await getEthUsd().catch(() => null);
+
+      lastHoldings.set(ctx.chat.id, holdings);
+      const text = buildHoldingsText({ holdings, ethUsd });
+      if (edit) await safeEdit(ctx, text, holdingsKeyboard(holdings), holdingsExtra);
+      else await ctx.reply(text, { ...holdingsExtra, ...holdingsKeyboard(holdings) });
+    } catch (err) {
+      await ctx.reply(`Couldn't read holdings: ${err.message}`);
+    } finally {
+      if (loading) await ctx.telegram.deleteMessage(ctx.chat.id, loading.message_id).catch(() => {});
+    }
+  };
+
+  bot.command(["holdings", "nfts"], (ctx) => showHoldings(ctx));
+  bot.action("menu:holdings", async (ctx) => {
+    await ctx.answerCbQuery();
+    await showHoldings(ctx);
+  });
+  bot.action("hold:refresh", async (ctx) => {
+    await ctx.answerCbQuery("Refreshing…");
+    await showHoldings(ctx, { edit: true });
+  });
+
+  // Lists one held collection at its floor, signed by the wallet that holds
+  // it. Same zero-floor refusal as the mint result card: OpenSea reports a
+  // floor of 0 when nothing is listed, and pricing a sale off that gives the
+  // token away — the one mistake here nobody can undo once it is filled.
+  bot.action(/^hold:sell:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const holdings = lastHoldings.get(ctx.chat.id);
+    const group = holdings?.groups?.[Number(ctx.match[1])];
+    if (!group) return ctx.reply("That list is stale — open *My NFTs* again.", { parse_mode: "Markdown" });
+
+    const settings = loadMintExecutionSettings();
+    if (!settings.enabled) return ctx.reply("⛔️ Execution is disabled.");
+    if (group.floorEth == null || !(group.floorEth > 0)) {
+      return ctx.reply("No floor to price against — nothing has resold, so there is no price to match.");
+    }
+
+    const priceEth = Number(group.floorEth.toFixed(6));
+    if (!(priceEth > 0)) return ctx.reply("Refusing to list at zero.");
+
+    const chain = { key: group.chainKey, ...CHAINS[group.chainKey] };
+    if (settings.dryRun) {
+      return ctx.reply(
+        `🧪 *Dry run* — would list ${group.tokens.map((t) => "#" + t.tokenId).join(", ")} at *${priceEth} ETH* each. Nothing was listed.`,
+        { parse_mode: "Markdown" }
+      );
+    }
+
+    await ctx.reply(`Listing ${group.tokens.length} token(s) at ${priceEth} ETH…`);
+    for (const token of group.tokens) {
+      try {
+        // Per token, because one collection's tokens can sit in different
+        // burners once more than one wallet minted the same drop.
+        const signer = await signerForMintWallet(chain, token.walletAddress);
+        if (!signer) {
+          await ctx.reply(`Skipped #${token.tokenId} — \`${token.walletAddress}\` is not in the mint wallet roster.`, { parse_mode: "Markdown" });
+          continue;
+        }
+        await listNftForSale(chain, {
+          contractAddress: group.contractAddress,
+          signer,
+          tokenId: token.tokenId,
+          priceEth,
+          collectionSlug: group.slug,
+        });
+        await ctx.reply(`🏷 Listed #${token.tokenId} at ${priceEth} ETH`);
+      } catch (err) {
+        await ctx.reply(`Couldn't list #${token.tokenId}: ${err.shortMessage || err.message}`);
+      }
+    }
+  });
 
   bot.action("mint:sellfloor", (ctx) => listAtFloor(ctx, 100));
   bot.action("mint:sellfloor:110", (ctx) => listAtFloor(ctx, 110));

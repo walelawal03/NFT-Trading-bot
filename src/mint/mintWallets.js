@@ -104,3 +104,26 @@ export function clearMintWallets() {
   writeRaw([]);
   return true;
 }
+
+/**
+ * A connected signer for one mint wallet, by address.
+ *
+ * The third and last function in this file that touches key material, named
+ * to say so. It exists because selling is not minting: an NFT minted by a
+ * burner in this roster can only be listed by that same burner, and the
+ * execution layer's default signer is the main wallet from
+ * WALLET_PRIVATE_KEY, which does not own it.
+ *
+ * Returns null for an address not in the roster rather than throwing, so a
+ * stale button on an old message fails as "not ours" instead of as a crash.
+ *
+ * The provider import is dynamic because src/wallet.js pulls in config and
+ * every chain provider, and this file is also imported by the configuration
+ * UI — which must stay key-free and cheap to load.
+ */
+export async function signerForMintWallet(chain, address) {
+  const row = readRaw().find((w) => w.address.toLowerCase() === String(address).toLowerCase());
+  if (!row) return null;
+  const { getProvider } = await import("../wallet.js");
+  return new Wallet(row.privateKey, getProvider(chain));
+}

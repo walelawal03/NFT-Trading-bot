@@ -269,3 +269,39 @@ export async function getBestListingBySlug(slug) {
     raw: listing,
   };
 }
+
+// Every NFT one wallet holds on one chain, as OpenSea sees it.
+//
+// Used only to WIDEN the candidate set for the holdings view — never as the
+// answer. OpenSea indexes on its own schedule, so a token minted a minute ago
+// is routinely absent here while very much sitting in the wallet, and a token
+// sold seconds ago can still be listed. Ownership is decided by `ownerOf` in
+// mint/nftHoldings.js; this only suggests where to look.
+//
+// Paged deliberately rather than trusting one call: the default page is 50,
+// and a wallet that minted a 60-item allocation would silently show 50.
+export async function getAccountNfts(chainKey, address, { maxPages = 4, limit = 50 } = {}) {
+  const out = [];
+  let next = null;
+
+  for (let page = 0; page < maxPages; page++) {
+    const body = await request(`/chain/${openseaChainSlug(chainKey)}/account/${address}/nfts`, {
+      params: { limit, next },
+    });
+    for (const nft of body.nfts || []) {
+      if (!nft?.contract || nft.identifier == null) continue;
+      out.push({
+        contractAddress: nft.contract,
+        tokenId: String(nft.identifier),
+        name: nft.name || null,
+        collectionName: nft.collection || null,
+        imageUrl: nft.image_url || null,
+        standard: nft.token_standard || null,
+      });
+    }
+    next = body.next || null;
+    if (!next) break;
+  }
+
+  return out;
+}

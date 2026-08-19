@@ -105,10 +105,24 @@ export async function buyNftCollectionFloor(chain, { contractAddress, maxPriceEt
 // failure here degrades to "stays unlisted, retried next cycle" rather than
 // touching any position bookkeeping. Verify against a real, small listing
 // before trusting this with a meaningful position size.
-export async function listNftForSale(chain, { contractAddress, tokenId, priceEth, standard = "erc721", collectionSlug }) {
-  const wallet = requireWallet(chain);
+// `signer` overrides the configured main wallet, and the mint side always
+// passes it. Without it this signed with WALLET_PRIVATE_KEY while the token
+// sat in a burner from data/mintWallets.json — a listing offered by an
+// address that owns nothing, which Seaport accepts as an order and then
+// fails to fulfil. The ownership check below makes that class of mistake
+// loud instead of silent: it costs one eth_call and saves an approval
+// transaction sent from the wrong wallet.
+export async function listNftForSale(chain, { contractAddress, tokenId, priceEth, standard = "erc721", collectionSlug, signer = null }) {
+  const wallet = signer ?? requireWallet(chain);
   const abi = standard === "erc1155" ? ERC1155_ABI : ERC721_ABI;
   const nft = new Contract(contractAddress, abi, wallet);
+
+  if (standard !== "erc1155") {
+    const owner = await nft.ownerOf(tokenId);
+    if (String(owner).toLowerCase() !== wallet.address.toLowerCase()) {
+      throw new Error(`${wallet.address} does not own token #${tokenId} (owner is ${owner})`);
+    }
+  }
 
   const isApproved = await nft.isApprovedForAll(wallet.address, SEAPORT_ADDRESS);
   if (!isApproved) {

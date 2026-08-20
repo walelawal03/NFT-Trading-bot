@@ -1,4 +1,4 @@
-import { isPaused } from "./botState.js";
+import { isPaused, isNftNotificationsEnabled } from "./botState.js";
 import { countCalledNft } from "./store/db.js";
 import { createBot } from "./telegram/bot.js";
 import { config } from "./config.js";
@@ -133,6 +133,17 @@ async function handleUpcomingDrop({ chain, contractAddress, priceWei, startsAt, 
 
   // Everything below this line decides whether to INTERRUPT someone. The log
   // line above is the complete record either way.
+  // The mute the operator already set.
+  //
+  // This path originally called bot.telegram.sendMessage directly and so
+  // ignored it — which meant a bot with NFT notifications explicitly turned
+  // OFF started sending a new kind of NFT notification. Every other NFT
+  // message respects this flag (postNftUpdate and postNftCall both check it);
+  // a new one that does not is not a new feature, it is a broken switch.
+  //
+  // Toggle lives in the 🖼 NFTs menu, and the underlying discovery keeps
+  // running and logging regardless — this governs the interruption only.
+  if (!isNftNotificationsEnabled()) return;
   if (!ALERT_CHAINS.has(chain.key)) return;
   if (priceWei !== 0n) return;
   if (leadMs < ALERT_MIN_LEAD_MS || leadMs > ALERT_MAX_LEAD_MS) return;

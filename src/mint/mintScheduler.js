@@ -83,6 +83,32 @@ const armedPath = () => path.join(getDataDir(), "armedMints.json");
 
 const keyFor = (chainKey, contractAddress) => `${chainKey}:${contractAddress.toLowerCase()}`;
 
+/**
+ * Says what happened, to the console AND to Telegram.
+ *
+ * Every outcome here used to go only to Telegram. On the first live scheduled
+ * mint (Black GUYT, 2026-08-20) that send failed —
+ *
+ *   [mintScheduler] notify failed: connect ETIMEDOUT 149.154.166.110:443
+ *
+ * — from Lagos, where reaching Telegram is not guaranteed. The mint itself was
+ * perfect: fired on time, first block, first of ten minters. Nobody was told.
+ * Worse, because prepare() also reported only to Telegram, the logs could not
+ * confirm it had even run; the only way to know the bot had worked was to read
+ * the chain by hand.
+ *
+ * For a feature whose entire promise is "it fires without you", a silent
+ * success is nearly as bad as a silent failure. The console is the transport
+ * that cannot fail — it is local, pm2 keeps it, and it costs nothing.
+ *
+ * Markdown is stripped for the console line: asterisks and backticks are for
+ * Telegram, and they make a log line harder to read, not easier.
+ */
+async function report(notify, chatId, message, level = "log") {
+  console[level](`[mintScheduler] ${message.replace(/[*`]/g, "").replace(/\n\s*/g, " | ")}`);
+  await notify?.(chatId, message);
+}
+
 // Throttled per CHAIN rather than per armed mint: three drops armed on the
 // same chain share one connection pool, so three pings would buy exactly what
 // one buys and spend three times the requests.
@@ -236,7 +262,7 @@ async function prepare(entry, notify) {
       // and a phone buzzing every five seconds for ninety seconds is not
       // information.
       if (entry.prepareFailures === 1) {
-        await notify?.(entry.chatId, `⚠️ Couldn't prepare \`${entry.contractAddress}\`: ${prep.reason ?? prep.signed.map((x) => x.reason).filter(Boolean).join("; ")} — retrying until it opens.`);
+        await report(notify, entry.chatId, `⚠️ Couldn't prepare \`${entry.contractAddress}\`: ${prep.reason ?? prep.signed.map((x) => x.reason).filter(Boolean).join("; ")} — retrying until it opens.`, "error");
       }
       return;
     }
@@ -245,12 +271,12 @@ async function prepare(entry, notify) {
     entry.prepared = { signed: prep.signed, call: prep.call, preparedAt: Date.now() };
     entry.prepareFailures = 0;
     const ready = prep.signed.filter((x) => x.ok).length;
-    await notify?.(entry.chatId, `🔧 Prepared ${ready} signed transaction(s) for \`${entry.contractAddress}\` — firing at the open.`);
+    await report(notify, entry.chatId, `🔧 Prepared ${ready} signed transaction(s) for \`${entry.contractAddress}\` — firing at the open.`);
   } catch (err) {
     entry.prepared = null;
     scheduleRetry(entry);
     if (entry.prepareFailures === 1) {
-      await notify?.(entry.chatId, `⚠️ Couldn't prepare the scheduled mint for \`${entry.contractAddress}\`: ${err.message} — retrying until it opens.`);
+      await report(notify, entry.chatId, `⚠️ Couldn't prepare the scheduled mint for \`${entry.contractAddress}\`: ${err.message} — retrying until it opens.`, "error");
     }
   } finally {
     entry.preparing = false;
@@ -273,7 +299,7 @@ async function fire(entry, notify) {
     // instead — a missed mint is better than a mint that arrives late AND
     // reverts.
     if (!entry.prepared) {
-      await notify?.(entry.chatId, `⛔️ \`${entry.contractAddress}\` opened but nothing was prepared — not firing.`);
+      await report(notify, entry.chatId, `⛔️ \`${entry.contractAddress}\` opened but nothing was prepared — not firing.`, "error");
       return;
     }
 
@@ -296,9 +322,9 @@ async function fire(entry, notify) {
       ),
       ...failed.map((r) => `  ⚠️ \`${r.address.slice(0, 10)}…\` ${r.stage}: ${r.reason}`),
     ];
-    await notify?.(entry.chatId, lines.join("\n"));
+    await report(notify, entry.chatId, lines.join("\n"), sent.length ? "log" : "error");
   } catch (err) {
-    await notify?.(entry.chatId, `⚠️ Scheduled mint failed: ${err.message}`);
+    await report(notify, entry.chatId, `⚠️ Scheduled mint failed: ${err.message}`, "error");
   } finally {
     if (entry.fireTimer) clearTimeout(entry.fireTimer);
     armed.delete(entry.key);
@@ -412,9 +438,14 @@ function restoreArmedMints(notify) {
   console.log(`[mintScheduler] restored ${restored} armed mint(s)${missed.length ? `, ${missed.length} opened while down` : ""}`);
 
   for (const row of missed) {
-    notify?.(
+    // Console too: a mint that opened while the process was down is the single
+    // event most worth finding in a log afterwards, and a restart is exactly
+    // when the Telegram send is least likely to succeed.
+    report(
+      notify,
       row.chatId,
-      `⏰ \`${row.contractAddress}\` opened at ${new Date(row.startsAtMs).toISOString().replace("T", " ").slice(0, 16)} UTC while the bot was restarting, so it was not fired. Paste the address to mint it now.`
-    ).catch?.(() => {});
+      `⏰ \`${row.contractAddress}\` opened at ${new Date(row.startsAtMs).toISOString().replace("T", " ").slice(0, 16)} UTC while the bot was restarting, so it was not fired. Paste the address to mint it now.`,
+      "warn"
+    ).catch(() => {});
   }
 }

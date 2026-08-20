@@ -25,6 +25,32 @@ function isRetryable(err) {
   return !NON_RETRYABLE_ERROR_CODES.has(err?.code);
 }
 
+// Most JSON-RPC calls ethers will pack into one HTTP request.
+//
+// ethers defaults this to 100. Base's own endpoint refuses anything over 10:
+//
+//   POST https://mainnet.base.org  [25 calls]
+//   -> {"code":-32014,"message":"maximum 10 calls in 1 batch"}
+//
+// and the refusal fails the WHOLE batch, so every call inside it errors at
+// once. Measured 2026-08-20 while scanning 40 Base collections: a flood of
+// "call failed / getStorage failed / getCode failed on https://mainnet.base.org,
+// served by https://base-rpc.publicnode.com" — dozens of them, every read
+// paying a wasted round trip to the primary before a backup answered. It read
+// like a flaky endpoint and it was nothing of the sort; the same endpoint
+// answers 40 concurrent single calls 40/40 and a 10-call batch instantly.
+//
+// Reordering to lead with publicnode would also have "fixed" it and would
+// have been wrong: Base leads with its own endpoint because that is the only
+// one serving the 1000-block log queries the collection watcher makes (see
+// chains.js), so demoting it to fix reads would quietly break log polling.
+//
+// 10 is the most restrictive limit measured across every endpoint in use.
+// publicnode answers 50 happily on both chains, but a batch size that works
+// everywhere is worth more than a few saved HTTP requests on the endpoints
+// that are more generous.
+const MAX_BATCH_CALLS = 10;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Pause before the final re-ask of the primary. The failure this exists for
@@ -61,7 +87,10 @@ export class FailoverProvider extends JsonRpcProvider {
   // long after the request it was created for succeeded elsewhere.
   constructor(urls, label, chainId) {
     const network = chainId != null ? Network.from(Number(chainId)) : undefined;
-    super(urls[0], network, network ? { staticNetwork: network } : undefined);
+    super(urls[0], network, {
+      ...(network ? { staticNetwork: network } : {}),
+      batchMaxCount: MAX_BATCH_CALLS,
+    });
     this.#urls = urls;
     this.#label = label;
     this.#network = network;

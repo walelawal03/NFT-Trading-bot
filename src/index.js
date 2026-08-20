@@ -5,6 +5,8 @@ import { config } from "./config.js";
 import { startNftCollectionWatcher } from "./watchers/nftCollectionWatcher.js";
 import { startNftWalletWatcher } from "./watchers/nftWalletWatcher.js";
 import { startSeaDropWatcher } from "./watchers/seaDropWatcher.js";
+import { detectNftMint } from "./mint/nftMintDetect.js";
+import { detectNftDangerousFunctions, assessNftContractRisk } from "./risk/nftDangerousFunctions.js";
 import { formatEther } from "ethers";
 import { evaluateNftCollection } from "./nftPipeline.js";
 import { startNftBuyRecheckQueue } from "./nftBuyRecheckQueue.js";
@@ -73,32 +75,99 @@ async function handleWalletNftBuy({ chain, walletAddress, contractAddress, price
   }
 }
 
+// How soon a drop must open to be worth a notification.
+//
+// The first version alerted on every free drop the moment it was announced,
+// and on Robinhood that is a message every couple of minutes — including one
+// opening in November, 99 days out. A push notification is a claim on
+// attention right now, and a drop three months away is not that. Both bounds
+// exist because being too early is as useless as being too late:
+//
+//   under the floor, there is no time to arm it — the scheduler needs 90s to
+//   re-read, sign and prepare, and a drop opening in 60 seconds can only be
+//   minted by hand
+//   over the ceiling, it is a diary entry, not an alert
+const ALERT_MIN_LEAD_MS = 3 * 60 * 1000;
+const ALERT_MAX_LEAD_MS = 12 * 60 * 60 * 1000;
+
 // A drop announced but not yet open — the only kind that can be armed.
 //
-// Reported rather than acted on. What the announcement carries is a schedule,
+// Underwritten before it is announced, which is the entire point of this bot:
+// discovery alone is a firehose, and CLAUDE.md's premise is that we compete on
+// SELECTION, not on being the first to know a drop exists. Every alert
+// therefore carries a name, a supply, and the Stage A bytecode verdict, and a
+// contract that fails the hard gate is never announced at all.
+//
+// Still reports rather than acts. What the announcement carries is a schedule,
 // not a price: a creator can re-emit with different terms right up to the
 // open, observed the same hour this was written (Evolastion announced free,
 // opened at 0.01 ETH). Deciding to spend belongs to the person, after a fresh
-// read of the contract — which is what pasting the address does.
+// read — which is what pasting the address does, and what prepare() redoes.
 async function handleUpcomingDrop({ chain, contractAddress, priceWei, startsAt, maxPerWallet }) {
   if (isPaused()) return;
   const price = priceWei === 0n ? "FREE" : `${formatEther(priceWei)} ${chain.nativeSymbol || "ETH"}`;
-  const mins = Math.round((startsAt.getTime() - Date.now()) / 60000);
+  const leadMs = startsAt.getTime() - Date.now();
+  const mins = Math.round(leadMs / 60000);
   console.log(
     `[${chain.key}] upcoming drop ${contractAddress} — ${price}, opens ${startsAt.toISOString()} (in ${mins}m), max ${maxPerWallet}/wallet`
   );
-  // Free drops only. A paid one is a spending decision that deserves the mint
-  // card rather than a push notification, and alerting on every configured
-  // drop on Base would be a message every few minutes.
+
+  // Everything below this line decides whether to INTERRUPT someone. The log
+  // line above is the complete record either way.
   if (priceWei !== 0n) return;
-  const text =
-    `🆓 *Free drop opening in ${mins}m* — ${chain.label}\n` +
-    `\`${contractAddress}\`\n` +
-    `Opens ${startsAt.toISOString().replace("T", " ").slice(0, 19)}Z · max ${maxPerWallet}/wallet\n\n` +
-    `_Terms can still change before it opens — paste the address to read it fresh and arm it._`;
-  await bot.telegram
-    .sendMessage(config.telegram.chatId, text, { parse_mode: "Markdown" })
-    .catch((e) => console.error("[seaDrop] notify failed:", e.message));
+  if (leadMs < ALERT_MIN_LEAD_MS || leadMs > ALERT_MAX_LEAD_MS) return;
+
+  try {
+    // Both reads are pure RPC — no OpenSea, no explorer — so they work on a
+    // contract deployed a minute ago, which is every drop this watcher finds.
+    const [detect, scan] = await Promise.all([
+      detectNftMint(chain, contractAddress, { budgetMs: 8000 }).catch(() => null),
+      detectNftDangerousFunctions(chain, contractAddress, { budgetMs: 8000 }).catch(() => null),
+    ]);
+    const verdict = scan ? assessNftContractRisk(scan) : null;
+
+    // A contract that can seize or freeze what you mint is not a lead. It is
+    // silently dropped rather than announced with a warning, because an alert
+    // that has to be read carefully is an alert that will eventually be
+    // skimmed.
+    if (verdict?.fatal) {
+      console.log(`[${chain.key}] not alerting ${contractAddress} — FATAL: ${verdict.flags?.join(", ")}`);
+      return;
+    }
+
+    // Sold out before it opens. Not a contradiction: the supply can be minted
+    // through an allowlist or by the creator ahead of the public phase, and
+    // the public phase is still dutifully announced. Observed on the first
+    // batch of real alerts — Apheonn3 was 10/10 with a public drop scheduled
+    // two hours out. There is nothing to mint, so there is nothing to say.
+    if (detect?.soldOut) {
+      console.log(`[${chain.key}] not alerting ${contractAddress} — already sold out (${detect.totalSupply}/${detect.maxSupply})`);
+      return;
+    }
+
+    const name = detect?.name ? `*${detect.name}*` : "Unnamed collection";
+    const supply =
+      detect?.maxSupply != null ? `${detect.totalSupply ?? 0}/${detect.maxSupply} minted` : "supply unknown";
+    const gate = !verdict
+      ? "⚠️ contract unreadable"
+      : verdict.unknown
+        ? `⚠️ partially unreadable (−${verdict.deduction})`
+        : verdict.deduction === 0
+          ? "✅ clean bytecode"
+          : `⚠️ −${verdict.deduction}: ${(verdict.flags || []).slice(0, 2).join(", ")}`;
+
+    const text =
+      `🆓 *Free drop in ${mins}m* — ${chain.label}\n` +
+      `${name} · ${supply} · max ${maxPerWallet}/wallet\n` +
+      `${gate}\n` +
+      `\`${contractAddress}\`\n\n` +
+      `_Paste the address to read it fresh and arm it — terms can still change before it opens._`;
+    await bot.telegram
+      .sendMessage(config.telegram.chatId, text, { parse_mode: "Markdown" })
+      .catch((e) => console.error("[seaDrop] notify failed:", e.message));
+  } catch (err) {
+    console.error(`[${chain.key}] could not underwrite upcoming drop ${contractAddress}:`, err.message);
+  }
 }
 
 const bot = createBot(stats);

@@ -4,6 +4,7 @@ import { CHAINS } from "../chains.js";
 import { getDataDir } from "../dataDir.js";
 import { detectNftMint } from "./nftMintDetect.js";
 import { prepareSignedMints, broadcastSigned } from "./nftMintExecutor.js";
+import { getProvider } from "../wallet.js";
 
 // Fires a mint the moment its phase opens.
 //
@@ -35,6 +36,33 @@ const PREPARE_LEAD_MS = 90_000;
 // already in memory, not a network call.
 const TICK_MS = 1_000;
 
+// How often to poke the RPC connection while an armed mint waits.
+//
+// This is the single largest saving available anywhere in the fire path, and
+// it costs nothing. Measured against both chains from the same machine
+// (scripts/socketDecay.js, 2026-08-20), first call after N seconds of silence:
+//
+//              warm    3s idle   5s idle   20s idle
+//   Base       255ms   266ms     586ms     571ms
+//   Robinhood  173ms   172ms     496ms     530ms
+//
+// The cliff is between 3s and 5s on both — Cloudflare fronts every one of
+// these endpoints and closes idle connections on a 5s keep-alive timeout. So
+// the scheduler, which prepares 90s ahead and then goes quiet, was handing
+// every armed mint a DEAD socket: fire paid a full TCP + TLS handshake at the
+// exact moment it could least afford one, ~320ms on top of a ~170ms round
+// trip. That is where the "573ms at best" figure in nftMintExecutor.js came
+// from — it was never the floor, it was a cold fire.
+//
+// 2s, not 3s: 3s is the last measurement known to be warm, and picking the
+// last known-good value leaves no room for a slow tick or a jittery moment.
+// Over a 90s wait this is ~45 eth_blockNumber calls, which is nothing.
+//
+// morsy's bot warms sockets deliberately; CLAUDE.md lists it as one of that
+// bot's strengths. It is not a micro-optimisation, it is two thirds of the
+// latency gap.
+const KEEPALIVE_MS = 2_000;
+
 // Backoff after a failed preparation. Without one, a drop whose price cannot
 // be read is re-prepared on every tick for the whole 90-second lead: ninety
 // bursts of RPC against the endpoint we need to be responsive at the open,
@@ -54,6 +82,27 @@ const PREPARE_RETRY_MAX_MS = 30_000;
 const armedPath = () => path.join(getDataDir(), "armedMints.json");
 
 const keyFor = (chainKey, contractAddress) => `${chainKey}:${contractAddress.toLowerCase()}`;
+
+// Throttled per CHAIN rather than per armed mint: three drops armed on the
+// same chain share one connection pool, so three pings would buy exactly what
+// one buys and spend three times the requests.
+const lastWarmedAt = new Map(); // chainKey -> ms
+
+function keepConnectionWarm(chainKey, now) {
+  if (now - (lastWarmedAt.get(chainKey) ?? 0) < KEEPALIVE_MS) return;
+  lastWarmedAt.set(chainKey, now);
+  // Deliberately not awaited and deliberately silent. The tick must never
+  // block on it, and a failed ping is not news — the next one is 2s away, and
+  // if the endpoint is genuinely down the mint has larger problems that
+  // prepare() and fire() both report properly.
+  //
+  // send() rather than getBlockNumber(): ethers caches the latter, and a
+  // cache hit sends no packet, which would keep nothing warm at all. That
+  // exact mistake made the first version of socketDecay.js report 0ms.
+  getProvider({ key: chainKey, ...CHAINS[chainKey] })
+    .send("eth_blockNumber", [])
+    .catch(() => {});
+}
 
 // Only the intention is written. Signed transactions and the detect snapshot
 // stay in memory: a signature carries a nonce that will be stale after a
@@ -271,6 +320,13 @@ export function startMintScheduler({ notify } = {}) {
     const now = Date.now();
     for (const entry of armed.values()) {
       if (entry.fired) continue;
+
+      // Before anything else, and before the fireTimer branch below returns
+      // early — the whole point is that the connection is alive at the moment
+      // fire() sends, so the last ping must land within the keep-alive window
+      // of the send itself. Runs for the entire preparation lead, so the
+      // reads prepare() makes are warm too.
+      if (now >= entry.startsAtMs - PREPARE_LEAD_MS) keepConnectionWarm(entry.chainKey, now);
 
       // Never awaited across entries. Two armed mints are independent, and
       // awaiting one entry's 2.5s preparation before even looking at the next

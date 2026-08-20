@@ -46,6 +46,18 @@ mock.module(new URL("../src/mint/nftMintDetect.js", import.meta.url).href, {
   },
 });
 
+let warmPings = 0;
+mock.module(new URL("../src/wallet.js", import.meta.url).href, {
+  namedExports: {
+    getProvider: () => ({
+      send: async (method) => {
+        if (method === "eth_blockNumber") warmPings++;
+        return "0x1";
+      },
+    }),
+  },
+});
+
 let startsAt = Date.now() + 3600_000;
 
 const { armMint, disarmMint, listArmedMints, startMintScheduler } = await import("../src/mint/mintScheduler.js");
@@ -66,6 +78,7 @@ const reset = () => {
   detectCalls = 0;
   prepareDelayMs = 0;
   prepareResult = null;
+  warmPings = 0;
   for (const a of listArmedMints()) disarmMint(a.chainKey, a.contractAddress);
 };
 
@@ -252,4 +265,70 @@ test("an unparseable store degrades to empty rather than crashing the boot", () 
   const stop = startMintScheduler({ notify: async () => {} });
   stop();
   assert.equal(listArmedMints().length, 0);
+});
+
+// --- keep-alive ---------------------------------------------------------
+//
+// Measured 2026-08-20: every RPC endpoint this bot uses sits behind
+// Cloudflare, which drops an idle connection after 5s. The scheduler waits 90s
+// between preparing and firing, so without a ping the send lands on a dead
+// socket and pays a ~320ms handshake at the only moment that matters. These
+// assert the ping happens, and happens no more than it needs to.
+
+test("the connection is kept warm while an armed mint waits", async () => {
+  reset();
+  arm(6000);
+  const stop = startMintScheduler({ notify: async () => {} });
+  try {
+    // Longer than KEEPALIVE_MS (2s), shorter than the open, so this observes
+    // the waiting state rather than the fire.
+    await wait(2600);
+    assert.ok(warmPings >= 1, `socket was never pinged during the wait (${warmPings})`);
+  } finally {
+    stop();
+    reset();
+  }
+});
+
+test("a mint far from its open does not ping", async () => {
+  reset();
+  // An hour out is well outside the 90s preparation lead. Pinging here would
+  // be a request every 2s, forever, for every armed mint — against a public
+  // endpoint that rate limits.
+  arm(3600_000);
+  const stop = startMintScheduler({ notify: async () => {} });
+  try {
+    await wait(2600);
+    assert.equal(warmPings, 0, "pinged for a mint that is nowhere near opening");
+  } finally {
+    stop();
+    reset();
+  }
+});
+
+test("two mints on one chain share the ping, they do not double it", async () => {
+  reset();
+  // One connection pool per chain, so a second armed drop on the same chain
+  // buys nothing by pinging separately — it just spends twice the requests.
+  arm(6000);
+  armMint({
+    chain: CHAIN,
+    contractAddress: "0x1111111111111111111111111111111111111111",
+    detect: detectFor(startsAt),
+    quantity: 1,
+    walletCount: 1,
+    chatId: 1,
+  });
+  assert.equal(listArmedMints().length, 2, "second mint did not arm");
+  const stop = startMintScheduler({ notify: async () => {} });
+  try {
+    await wait(2600);
+    // Two armed mints, one chain: at a 2s interval a 2.6s window allows at
+    // most two pings. Unthrottled it would be double that.
+    assert.ok(warmPings <= 2, `throttle is per mint, not per chain (${warmPings} pings)`);
+    assert.ok(warmPings >= 1, "no ping at all");
+  } finally {
+    stop();
+    reset();
+  }
 });

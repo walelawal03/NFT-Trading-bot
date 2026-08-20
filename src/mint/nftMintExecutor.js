@@ -347,9 +347,28 @@ export async function findMaxMintable(chain, { detect, contractAddress, priceOve
  * public RPC, a fired mint that still has to fetch a nonce, fetch fee data,
  * estimate gas and sign pays ~2.5s before the send even starts. Every one of
  * those is knowable in advance, so the scheduler does them while waiting and
- * fire becomes a single eth_sendRawTransaction — one round trip, which
- * measured 573ms at best on this endpoint. That round trip is the floor; no
- * amount of preparation gets under it.
+ * fire becomes a single eth_sendRawTransaction — one round trip.
+ *
+ * That round trip was recorded here as "573ms at best, and no amount of
+ * preparation gets under it". Both halves were wrong, and the correction is
+ * worth keeping because it moved the whole strategy:
+ *
+ *   573ms was a COLD fire. Every endpoint we use sits behind Cloudflare,
+ *   which closes an idle connection after 5s, and the scheduler prepares 90s
+ *   ahead and then goes silent — so the send was paying a full TCP + TLS
+ *   handshake on top of the trip. Measured 2026-08-20 on the same endpoint
+ *   from the same machine: 173ms warm, 496ms after 5s of silence.
+ *
+ *   Preparation could not get under it, but a keep-alive ping could. The
+ *   scheduler now pokes the connection every 2s through the wait
+ *   (KEEPALIVE_MS in mintScheduler.js), so fire lands on a live socket.
+ *
+ * The real floor is therefore the warm round trip — ~173ms on Robinhood,
+ * ~255ms on Base, from Lagos. That number IS geography: those endpoints
+ * resolve to Cloudflare's Amsterdam edge from here, so it is Lagos-to-AMS,
+ * and the only lever left on it is running the process somewhere else.
+ * See scripts/rpcLatency.js and scripts/socketDecay.js — both re-runnable
+ * from any host, which is the point.
  *
  * Two things go stale between preparing and firing, and both are deliberate
  * trade-offs rather than oversights:

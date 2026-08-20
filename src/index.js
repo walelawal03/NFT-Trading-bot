@@ -90,6 +90,25 @@ async function handleWalletNftBuy({ chain, walletAddress, contractAddress, price
 const ALERT_MIN_LEAD_MS = 3 * 60 * 1000;
 const ALERT_MAX_LEAD_MS = 12 * 60 * 60 * 1000;
 
+// Which chains are worth a push notification, as opposed to a log line.
+//
+// Base only, and this is the whole reason the SeaDrop watcher was built: on
+// Base, OpenSea indexes a collection after the mint is usually over, drops are
+// short, and the field is deep — so learning about one early is the only way
+// to enter it at all.
+//
+// Robinhood is the opposite on every count. Its drops stay open for around a
+// day, so nothing is lost by finding one later through the OpenSea watcher;
+// the field is four to ten transactions deep, so there is no race to lose;
+// and a large share of what gets announced is people testing — "xyztest",
+// "Test mint j", "Apheonn3" sold out at 10/10 before its public phase. The
+// first hour of alerts was almost entirely Robinhood, almost entirely noise.
+//
+// Still WATCHED on every chain, because the log is a complete record and the
+// post-mortem reads from it. This governs interruption only. One line to
+// change if Robinhood ever gets busy enough to be worth racing.
+const ALERT_CHAINS = new Set(["base"]);
+
 // A drop announced but not yet open — the only kind that can be armed.
 //
 // Underwritten before it is announced, which is the entire point of this bot:
@@ -114,6 +133,7 @@ async function handleUpcomingDrop({ chain, contractAddress, priceWei, startsAt, 
 
   // Everything below this line decides whether to INTERRUPT someone. The log
   // line above is the complete record either way.
+  if (!ALERT_CHAINS.has(chain.key)) return;
   if (priceWei !== 0n) return;
   if (leadMs < ALERT_MIN_LEAD_MS || leadMs > ALERT_MAX_LEAD_MS) return;
 
@@ -148,13 +168,26 @@ async function handleUpcomingDrop({ chain, contractAddress, priceWei, startsAt, 
     const name = detect?.name ? `*${detect.name}*` : "Unnamed collection";
     const supply =
       detect?.maxSupply != null ? `${detect.totalSupply ?? 0}/${detect.maxSupply} minted` : "supply unknown";
+    // Proportionate, because a warning on the ordinary case is not a warning.
+    // Almost every drop scores −10 for "metadata destination unknown" plus a
+    // setMaxSupply setter, and both are what a normal pre-reveal collection
+    // looks like. Leading those with ⚠️ trains the reader to skim past the
+    // symbol, which is precisely when a real finding gets missed.
+    //
+    // Flags are long sentences ("Metadata destination unknown: Could not read
+    // a token URI (likely pre-reveal or non-standard)"), so only the part
+    // before the colon is shown — the clause after it is the explanation, and
+    // the alert is not the place to explain.
+    const shortFlags = (verdict?.flags || []).map((f) => String(f).split(":")[0]).slice(0, 2).join(", ");
     const gate = !verdict
-      ? "⚠️ contract unreadable"
+      ? "⚠️ contract unreadable — treat as unknown"
       : verdict.unknown
         ? `⚠️ partially unreadable (−${verdict.deduction})`
         : verdict.deduction === 0
           ? "✅ clean bytecode"
-          : `⚠️ −${verdict.deduction}: ${(verdict.flags || []).slice(0, 2).join(", ")}`;
+          : verdict.deduction <= 10
+            ? `✅ nothing dangerous · −${verdict.deduction} ${shortFlags}`
+            : `⚠️ −${verdict.deduction}: ${shortFlags}`;
 
     const text =
       `🆓 *Free drop in ${mins}m* — ${chain.label}\n` +

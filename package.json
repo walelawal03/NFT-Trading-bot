@@ -1,7 +1,7 @@
 {
-  "name": "degen-assistant-bot",
+  "name": "nft-mint-underwriter",
   "version": "0.1.0",
-  "description": "Telegram bot that watches new EVM token launches, filters them, scores risk, and posts price-tracked calls.",
+  "description": "Telegram bot that underwrites NFT mints — bytecode gate, exit simulation, and a scheduled mint executor — on Base and Robinhood Chain.",
   "type": "module",
   "main": "src/index.js",
   "engines": {
@@ -12,8 +12,6 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
-    "@anthropic-ai/sdk": "^0.111.0",
-    "@napi-rs/canvas": "^1.0.2",
     "dotenv": "^16.4.5",
     "ethers": "^6.13.2",
     "node-cron": "^3.0.3",

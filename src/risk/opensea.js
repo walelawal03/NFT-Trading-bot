@@ -101,11 +101,46 @@ export async function getCollection(slug) {
   };
 }
 
+// A floor price is a NUMBER PLUS A CURRENCY, and OpenSea tells us both.
+//
+// It was read as a bare number for a long time, and on Robinhood Chain that
+// is routinely wrong: the chain's own stablecoin, USDG, is a common listing
+// currency there. Observed 2026-08-20 —
+//
+//   black-guyt          floor_price 1.0        symbol "USDG"
+//   tales-of-blobs      floor_price 0.19       symbol "USDG"
+//   starstruck-by-proxy floor_price 0.0006499  symbol "ETH"
+//   prym-hood           floor_price 0          symbol ""     (no listings)
+//
+// Reading black-guyt's 1.0 as ETH valued one token at ~$2,340 instead of ~$1,
+// a factor of about 2,300. The holdings screen reported a portfolio worth
+// 1.0006 ETH when it was worth roughly two dollars.
+//
+// That was the harmless symptom. The same field feeds nftFilter's floor
+// thresholds, nftRisk's marketplace-liquidity score, the paper and real
+// trading entry/exit prices, and the outcome tracker — all of which were
+// treating stablecoin amounts as ether.
+//
+// So floorPriceEth is now null unless the floor really is in ETH. Every
+// existing caller reads it as "no floor data" and declines to act, which is
+// the correct failure: the convention across this codebase is that unknown
+// must never read as a usable value (see honeypot: null in sellability.js and
+// checked: false in nftDangerousFunctions.js). The raw number and its symbol
+// are carried alongside for anything that wants to DISPLAY the truth rather
+// than compute with it.
+const FLOOR_ETH_SYMBOLS = new Set(["ETH", "WETH"]);
+
 export async function getCollectionStats(slug) {
   const body = await request(`/collections/${slug}/stats`);
   const oneDay = (body.intervals || []).find((i) => i.interval === "one_day");
+  const floorPrice = body.total?.floor_price ?? null;
+  // Empty string means "no listings", not "ETH" — do not coerce it.
+  const floorPriceSymbol = body.total?.floor_price_symbol || null;
+  const floorIsEth = floorPriceSymbol != null && FLOOR_ETH_SYMBOLS.has(floorPriceSymbol.toUpperCase());
   return {
-    floorPriceEth: body.total?.floor_price ?? null,
+    floorPrice,
+    floorPriceSymbol,
+    floorPriceEth: floorIsEth ? floorPrice : null,
     numOwners: body.total?.num_owners ?? null,
     marketCapEth: body.total?.market_cap ?? null,
     totalSales: body.total?.sales ?? null,

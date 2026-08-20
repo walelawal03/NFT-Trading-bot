@@ -79,12 +79,23 @@ export function buildHoldingsText({ holdings, ethUsd = null }) {
     `🖼 *Your NFTs — ${totalTokens} across ${groups.length} collection${groups.length === 1 ? "" : "s"}*`,
   ];
 
+  // "Unpriced" used to cover two different situations, and merging them is
+  // how a USDG floor got silently added to an ETH total. A collection with no
+  // listings at all is unknown; a collection priced in another currency is
+  // known and simply not addable here. The header says which.
+  const otherCurrency = groups.filter((g) => g.floorEth == null && g.floorRaw != null && g.floorSymbol);
+  const unpriced = groups.length - pricedGroups.length - otherCurrency.length;
+
   if (pricedGroups.length) {
-    const unpriced = groups.length - pricedGroups.length;
+    const notes = [];
+    if (unpriced) notes.push(`${unpriced} unpriced`);
+    if (otherCurrency.length) notes.push(`${otherCurrency.length} priced in ${[...new Set(otherCurrency.map((g) => g.floorSymbol))].join("/")}`);
     lines.push(
       `Value at floor: *${eth(valueEth)} ETH*${usdSuffix(valueEth, ethUsd)}` +
-        (unpriced ? ` _(${unpriced} collection${unpriced === 1 ? "" : "s"} unpriced)_` : "")
+        (notes.length ? ` _(${notes.join(", ")}, not counted)_` : "")
     );
+  } else if (otherCurrency.length) {
+    lines.push(`_Nothing here has an ETH floor — ${otherCurrency.length} collection${otherCurrency.length === 1 ? " is" : "s are"} priced in ${[...new Set(otherCurrency.map((g) => g.floorSymbol))].join("/")}._`);
   } else {
     lines.push("_No floor prices yet — nothing here has resold on the secondary market._");
   }
@@ -107,6 +118,16 @@ export function buildHoldingsText({ holdings, ethUsd = null }) {
       const position = group.floorEth * group.tokens.length;
       block.push(
         `Floor ${eth(group.floorEth)} ETH${usdSuffix(group.floorEth, ethUsd)} · position ${eth(position)} ETH${usdSuffix(position, ethUsd)}`
+      );
+    } else if (group.floorRaw != null && group.floorSymbol) {
+      // Priced, just not in ether. Robinhood collections are frequently listed
+      // in USDG, and showing that as "No floor yet" would hide a real price —
+      // while showing it as ETH valued one token at $2,340 instead of $1.
+      // No USD figure and no position total: converting would need this
+      // token's own price, which nothing here fetches, and guessing is what
+      // caused the bug.
+      block.push(
+        `Floor ${group.floorRaw} ${escapeMd(group.floorSymbol)} · not in ETH, so not counted in the total`
       );
     } else {
       block.push("No floor yet");

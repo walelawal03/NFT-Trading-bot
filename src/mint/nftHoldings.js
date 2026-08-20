@@ -264,8 +264,17 @@ export async function priceHoldings(groups, { maxCollections = 8 } = {}) {
       // A floor of 0 is what OpenSea reports when nothing is listed, not a
       // price of zero. Same guard as the mint result card, for the same
       // reason: a zero here would flow into a list-at-floor action.
+      // floorEth stays ETH-only, because it is what the portfolio total sums
+      // and what the sell buttons price against — adding a USDG amount to an
+      // ETH total produces a number that means nothing.
       const floor = stats?.floorPriceEth ?? null;
       group.floorEth = floor != null && floor > 0 ? floor : null;
+      // The floor as OpenSea actually quotes it, currency included, so the
+      // display can tell "1 USDG" apart from "no floor" — those are very
+      // different facts about a collection and the screen should not merge
+      // them.
+      group.floorRaw = stats?.floorPrice != null && stats.floorPrice > 0 ? stats.floorPrice : null;
+      group.floorSymbol = stats?.floorPriceSymbol ?? null;
       group.stats = stats ?? null;
     })
   );

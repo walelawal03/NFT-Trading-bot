@@ -49,10 +49,51 @@ test("an unpriced collection is counted but adds nothing to the total", () => {
   const text = buildHoldingsText({
     holdings: holdings({ groups: [group(), group({ contractAddress: "0xaaa", name: "no floor", floorEth: null, slug: null })] }),
   });
-  assert.match(text, /1 collection unpriced/);
+  assert.match(text, /1 unpriced/);
   // Total must stay the priced collection's value, not be diluted by a zero.
   assert.match(text, /Value at floor: \*0\.002 ETH\*/);
   assert.match(text, /No floor yet/);
+});
+
+// --- floors quoted in another currency ----------------------------------
+//
+// The bug this catches shipped and was seen on a real screen: black-guyt's
+// floor is 1.0 USDG, OpenSea reports it as floor_price 1.0 with
+// floor_price_symbol "USDG", and reading the bare number as ETH valued one
+// token at ~$2,340 instead of ~$1. The holdings screen claimed a portfolio
+// worth 1.0006 ETH when it was worth about two dollars.
+
+test("a floor in another currency is shown, not converted to ETH", () => {
+  const text = buildHoldingsText({
+    holdings: holdings({
+      groups: [group({ name: "black guyt", floorEth: null, floorRaw: 1, floorSymbol: "USDG" })],
+    }),
+  });
+  assert.match(text, /1 USDG/, "the real currency is not shown");
+  assert.doesNotMatch(text, /1 ETH/, "a USDG amount is being rendered as ETH");
+  // "No floor yet" would be a lie — it has a floor, in a currency we cannot
+  // add to an ETH total.
+  assert.doesNotMatch(text, /No floor yet/);
+});
+
+test("a non-ETH floor never enters the ETH total", () => {
+  const text = buildHoldingsText({
+    holdings: holdings({
+      groups: [group(), group({ contractAddress: "0xaaa", name: "usdg one", floorEth: null, floorRaw: 1, floorSymbol: "USDG", slug: null })],
+    }),
+  });
+  // 0.002 from the ETH collection, and nothing whatsoever from the USDG one.
+  assert.match(text, /Value at floor: \*0\.002 ETH\*/);
+  assert.match(text, /priced in USDG/);
+});
+
+test("a non-ETH floor gets no sell button", () => {
+  // The sell path lists at a price derived from floorEth. Offering it for a
+  // collection whose floor is in another currency would list at the wrong
+  // number in the wrong denomination.
+  const kb = holdingsKeyboard(holdings({ groups: [group({ floorEth: null, floorRaw: 1, floorSymbol: "USDG" })] }));
+  const buttons = JSON.stringify(kb ?? {});
+  assert.doesNotMatch(buttons, /hold:sell/, "offered to sell a collection priced in another currency");
 });
 
 test("no floor anywhere says why rather than showing a zero valuation", () => {

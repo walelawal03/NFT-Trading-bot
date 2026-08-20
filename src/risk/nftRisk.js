@@ -6,11 +6,12 @@ import { getProvider } from "../wallet.js";
 import { getNftControllerRealizedRecord } from "../store/db.js";
 import { detectNftDangerousFunctions, assessNftContractRisk } from "./nftDangerousFunctions.js";
 
-// Same weighting shape as risk/riskScore.js (token side) — contract safety
-// carries the most weight, deployer history the least directly-observable
-// signal. "Liquidity & lock" becomes "marketplace liquidity" here (floor
-// price / volume / OpenSea verification status stand in for DEX liquidity,
-// since there's no LP to lock for an NFT collection).
+// Contract safety carries the most weight, deployer history the least
+// directly-observable signal. The shape is inherited from the token scorer
+// this repo was seeded from, where the second category was "liquidity &
+// lock"; here it is "marketplace liquidity" — floor price, volume and
+// OpenSea verification status stand in for DEX liquidity, since there is no
+// LP to lock for an NFT collection.
 const WEIGHTS = {
   contractSafety: 35,
   marketplaceLiquidity: 25,
@@ -163,10 +164,10 @@ async function resolveController(chain, contractAddress, flags) {
   return null;
 }
 
-// Identical logic to riskScore.js's scoreDeployerHistory — deliberately
-// duplicated rather than shared, matching this codebase's existing pattern
-// of parallel token/NFT (and paper/real trading) modules that stay
-// independently readable rather than sharing a common helper.
+// Reads a controller's REALIZED record — what actually happened to the
+// collections they shipped — not our own earlier opinion of them. The
+// distinction is the whole point; see getNftControllerRealizedRecord in
+// store/db.js for the feedback loop this replaced.
 async function scoreDeployerHistory(chain, contractAddress, flags) {
   const controller = await resolveController(chain, contractAddress, flags);
 
@@ -232,12 +233,14 @@ function gradeFor(score) {
   return { grade: "F", label: "Extreme Risk — likely scam" };
 }
 
-// chain must carry goplusChainId/etherscanChainId like the token-side chain
-// objects — NFT support currently covers Base and Robinhood Chain (see
-// nftChains.js), fully chain-parameterized the same way riskScore.js is.
-// Note: GoPlus doesn't cover Robinhood Chain at all (confirmed in
-// riskScore.js's goplusUnsupported handling) — nft_security calls there
-// fail closed to null and this degrades to NO_DATA_FACTOR automatically.
+// chain must carry goplusChainId/etherscanChainId. Which chains are actually
+// watched is nftChains.js — Base and Robinhood Chain today — and nothing here
+// is hard-coded to either.
+//
+// GoPlus does not cover Robinhood Chain at all, so nft_security calls there
+// fail closed to null and this degrades to NO_DATA_FACTOR. That is precisely
+// why the hard gate is self-hosted bytecode analysis with no aggregator on
+// the path: on our primary target chain, the aggregator has nothing to say.
 export async function computeNftRiskScore(chain, contractAddress) {
   const flags = [];
 

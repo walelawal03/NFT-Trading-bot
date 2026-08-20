@@ -27,10 +27,10 @@ const ERC1155_ABI = [
   "function setApprovalForAll(address operator, bool approved)",
 ];
 
-// Hard ceiling independent of nftRealTradingSettings.json — same "defense
-// in depth" role as swapExecutor.js's ABSOLUTE_MAX_USD_PER_TRADE, sized in
-// ETH instead of USD since NFT floor prices routinely exceed what makes
-// sense as a token-swap-style USD ceiling.
+// Hard ceiling independent of nftRealTradingSettings.json. Defense in depth:
+// a settings file is one bad edit away from an unbounded spend, and the
+// ceiling that matters is the one no config can raise. Denominated in ETH
+// rather than USD because that is what a floor price is quoted in.
 const ABSOLUTE_MAX_ETH_PER_NFT_BUY = 0.15;
 
 function requireWallet(chain) {
@@ -73,7 +73,7 @@ export async function buyNftCollectionFloor(chain, { contractAddress, maxPriceEt
   // discipline isn't practical here (we don't know the exact token id until
   // after the fill), so this confirms via ownerOf/balanceOf after the fact
   // instead, same "never trust the tx succeeded just because it didn't
-  // revert" spirit as swapExecutor.js's post-buy balance checks.
+  // revert".
   const tokenId = listing.tokenId;
   let owned = true;
   try {

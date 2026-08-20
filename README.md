@@ -1,73 +1,115 @@
-# Degen Assistant Bot
+# NFT Mint Underwriter
 
-Telegram bot that watches new token launches on EVM chains, filters them through
-a configurable rule set, scores risk, and posts "calls" with ongoing price updates.
+Telegram bot that decides whether a drop is worth minting, then mints it.
+
+It is not a sniper. Operating from Lagos on public RPC means 150–250ms RTT
+against competitors colocated near the sequencer, and that gap is physics, not
+code. So it doesn't compete on speed. It competes on **selection** (not minting
+rugs), **exits** (most mint bots have none), and **chain timing** (young chains
+where bot infrastructure hasn't arrived yet).
+
+Default chains are Base and Robinhood Chain. Ethereum is deliberately not one.
 
 ## What it does today
 
-1. Listens for `PairCreated` events on DEX factories (Uniswap V2 on Ethereum/Base/Arbitrum,
-   PancakeSwap V2 on BSC) via WebSocket RPC — this is how it detects new launches in real time.
-2. Pulls contract-safety, liquidity/lock, and holder data (GoPlus Security API) plus
-   live price/liquidity (DexScreener API) for every new token.
-3. Computes a 0–100 risk score across four weighted categories: contract safety,
-   liquidity & lock, holder distribution, deployer history.
-4. Runs the token through `data/filters.json` — your "special filter." Only tokens that
-   pass every threshold get posted to your Telegram chat as a call.
-5. Re-checks price on every called token every `PRICE_UPDATE_INTERVAL_MINUTES` for
-   `PRICE_UPDATE_WINDOW_HOURS`, posting % change updates.
+1. **Reads the drop from a pasted address or link.** `nftMintDetect.js` resolves
+   the mint entrypoint — SeaDrop or a direct `mint`/`publicMint` on the
+   collection — along with price, phase window, max per wallet, and remaining
+   supply. Straight from chain state, so it works on a contract deployed sixty
+   seconds ago that no aggregator has indexed.
+2. **Stage A — the bytecode gate.** `nftDangerousFunctions.js` extracts the
+   contract's selectors and matches them against 82 known-dangerous ones across
+   six tables: seizure and transfer locks are fatal, metadata/supply/economics/
+   upgrade controls deduct, a freeze capability earns points back. Resolves
+   EIP-1167, EIP-1967, EIP-1822 and beacon proxies before reading, so a proxied
+   drop isn't scored as an empty shell.
+3. **Stage B — the exit simulation.** `nftRoundTripProbe.js` mints one and
+   moves it in a single atomic `eth_call`, with probe bytecode and a scratch
+   balance planted by state override. Zero gas, no key, nothing broadcast. The
+   operator half borrows Seaport's own address, so a transfer validator's
+   allowlist is consulted for the address a real sale would actually use.
+   Answers whether the token can be sold — soulbound, approval-blocked and
+   operator-blocked are separate verdicts, not one.
+4. **Mints it,** across as many burner wallets as you've imported, with a spend
+   ceiling, a dry-run default, gas estimation and nonce-conflict recovery. A
+   phase that hasn't opened yet can be armed: the scheduler prepares and signs
+   90 seconds ahead against a block-timestamp override, then fires on an exact
+   timer.
+5. **Tracks what you hold and can list it.** Holdings are verified by `ownerOf`
+   rather than trusted from a local file, and listing signs with the burner that
+   actually holds the token.
 
-More features (new chains, DEXs, alert types, backtesting, etc.) get added incrementally —
-this is intentionally a minimal but working core.
+Collection discovery and wallet copy-trading run behind `OPENSEA_API_KEY`.
+Everything above works without it.
 
 ## Setup
 
-1. **Create the bot**: message [@BotFather](https://t.me/BotFather) on Telegram, run
+1. **Create the bot**: message [@BotFather](https://t.me/BotFather), run
    `/newbot`, copy the token into `TELEGRAM_BOT_TOKEN`.
-2. **Get your chat id**: message [@userinfobot](https://t.me/userinfobot) for your personal id,
-   or add the bot as admin to a channel/group and use that channel's numeric id
-   (starts with `-100`). Put it in `TELEGRAM_CHAT_ID`.
-3. **Get your user id** (for admin-only commands) — same @userinfobot — put in `ADMIN_USER_ID`.
-4. Copy `.env.example` to `.env` and fill in the values above. The default RPC endpoints
-   (publicnode.com) and GoPlus/DexScreener APIs need no signup to get started.
-5. Optional but recommended: get a free [Etherscan API key](https://etherscan.io/apis) and
-   set `ETHERSCAN_API_KEY` — powers the deployer-history part of the risk score. Works fine
-   without it (that category just defaults to a neutral score).
-6. Install deps and run:
+2. **Get your chat id**: [@userinfobot](https://t.me/userinfobot) for your
+   personal id, or a channel/group's numeric id (starts with `-100`). Put it in
+   `TELEGRAM_CHAT_ID`.
+3. **Get your user id** for admin-gated actions — same bot — into
+   `ADMIN_USER_ID`.
+4. Copy `.env.example` to `.env`. The default RPC endpoints need no signup.
+5. Set `REAL_TRADING_PASSCODE`. Without it the wallet menu locks itself out
+   rather than exposing key reveal and key replacement behind a single tap.
+6. Optional: `ETHERSCAN_API_KEY` (deployer lookups; falls back to Blockscout),
+   `OPENSEA_API_KEY` (discovery, copy-trading, floor prices, listing).
 
 ```bash
 npm install
 npm start
 ```
 
-## Tuning "my special filter"
+Then publish the command list once:
 
-Edit `data/filters.json` (or use `/setfilter <key> <value>` in Telegram, admin only) —
-no restart required, it's read fresh on every token. Current thresholds:
-
-- `minLiquidityUsd`, `minHolderCount`, `maxTop10HolderPercent`, `maxCreatorHolderPercent`
-- `requireLpLockedOrBurned`, `requireNotHoneypot`, `requireOpenSource`, `blockMintable`
-- `minRiskScore` — overall risk score floor
-- `maxTokenAgeMinutes` — currently a no-op for the live watcher (it always reacts at age 0);
-  kept for when a backlog/polling path gets added.
-
-Tell me your exact filter rules (specific thresholds, chains to prioritize, tokens/patterns
-to always exclude, etc.) and I'll encode them directly instead of the current defaults.
+```bash
+node scripts/setupBotFather.mjs
+```
 
 ## Telegram commands
 
-- `/start` — status + command list
-- `/status` — watcher stats
-- `/filter` — show current filter thresholds
-- `/setfilter <key> <value>` — change a threshold live (admin only)
-- `/score <chain> <tokenAddress>` — on-demand risk score for any token
-- `/watchlist` — tokens currently being price-tracked
+- `/start` — main menu
+- `/mint <address>` — read a drop's mint config
+- `/mintwallets` — import and manage the burner wallets a mint spreads across
+- `/mintsettings` — minting on/off, dry run, spend ceiling
+- `/armed`, `/disarm` — mints waiting on a phase to open
+- `/holdings` (`/nfts`) — what those wallets actually hold, verified on-chain
+- `/nftcheck <address>` — contract scan, no OpenSea, no GoPlus
+- `/nftscore <address>` — full risk score (needs OpenSea to have indexed it)
+- `/nftfilter`, `/setnftfilter <key> <value>` — filter thresholds
+- `/watchwallet`, `/unwatchwallet`, `/watchwallets` — copy-trade signals
+- `/status`, `/chatid`
 
-## Notes / next steps
+Pasting a bare address or an OpenSea link needs no command at all — it opens
+the mint card directly.
 
-- Chains are configured in `src/chains.js` (factory address, wrapped native, API chain ids).
-  Add more DEXs (Uniswap V3, Aerodrome, etc.) or chains (Solana would need a different
-  watcher since it's not EVM) as separate watcher modules later.
-- Storage is a local SQLite file at `data/bot.sqlite` (seen pairs, called tokens, deployer
-  history used to flag serial ruggers over time).
-- This is not financial advice and the bot can't guarantee accuracy of third-party data
-  (GoPlus/DexScreener) — treat calls as a filtered shortlist, not a buy signal.
+## Command line
+
+```bash
+node scripts/nftScan.js <chain> <address...>   # read-only, no wallet
+node scripts/newMintWallet.mjs                 # generate a burner
+```
+
+## Tests
+
+Offline. The provider is stubbed via `mock.module`, so there is no network, no
+env, and no test-only exports in production code.
+
+```bash
+TELEGRAM_BOT_TOKEN=x TELEGRAM_CHAT_ID=1 ADMIN_USER_ID=1 \
+  node --experimental-test-module-mocks tests/<suite>.test.mjs
+```
+
+## Notes
+
+- Chains live in `src/chains.js`; which of them the NFT side watches is
+  `src/nftChains.js`. Robinhood Chain's WSS is a sequencer feed, not a JSON-RPC
+  endpoint, which is why it carries two HTTP endpoints and no derived one.
+- Storage is SQLite at `data/bot.sqlite`.
+- This repo was seeded from a token trading bot. That bot is a separate
+  project; none of it remains here.
+- Not financial advice. A passing scan means no known-dangerous capability was
+  found and the exit simulated cleanly — it is not a prediction that anyone
+  will want to buy the thing.

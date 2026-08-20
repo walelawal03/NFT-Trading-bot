@@ -5,14 +5,19 @@ import { Telegraf } from "telegraf";
 
 const tg = new Telegraf(process.env.TELEGRAM_BOT_TOKEN).telegram;
 
-// Only the NFT commands. The tree still contains the token bot's handlers
-// (/score, /filter, /track, /watchlist, /presets …) because bot.js renders
-// shared menus, but this is an NFT-only bot and its command list should say
-// so — a menu offering token commands invites using them.
+// This list must stay in step with the bot.command() handlers in
+// telegram/bot.js — a command advertised here that no longer exists is worse
+// than one that was never advertised, because Telegram autocompletes it and
+// the tap does nothing. The token commands this list used to exclude by hand
+// no longer exist at all.
 const commands = [
   { command: "start", description: "Show the main menu" },
   { command: "mint", description: "Read a drop's mint config: price, phase, max per wallet, and how it mints" },
   { command: "mintwallets", description: "Import and manage the wallets a mint is spread across" },
+  { command: "mintsettings", description: "Minting on/off, dry run, and the spend ceiling" },
+  { command: "armed", description: "List mints armed to fire when their phase opens" },
+  { command: "disarm", description: "Cancel an armed mint" },
+  { command: "holdings", description: "The NFTs these wallets actually hold, verified on-chain" },
   { command: "nftcheck", description: "Scan a contract — no OpenSea, no GoPlus. Works on brand-new contracts" },
   { command: "nftscore", description: "Full risk score for a collection (needs OpenSea to have indexed it)" },
   { command: "nftfilter", description: "Show the current NFT filter thresholds" },

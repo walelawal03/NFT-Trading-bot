@@ -1,7 +1,10 @@
-// Shared by bytecodeAnalysis.js (the paused "count unknown selectors"
-// heuristic) and dangerousFunctions.js (the shipped, targeted dangerous-
-// signature check) — kept in its own file so the two can be committed and
-// deployed independently of each other.
+// Selector extraction, kept in its own file rather than folded into its
+// caller. It used to have two consumers — a "count unknown selectors"
+// heuristic and a targeted dangerous-signature check — and both were on the
+// token side, so both went with the token prune.
+// nftDangerousFunctions.js is the one left, and the split still earns its
+// keep: this is the part that is verified against real bytecode and should
+// not be edited casually while tuning a selector table.
 
 // Standard Solidity dispatcher pattern: PUSH4 <selector> (opcode 0x63) is
 // immediately followed by EQ (0x14) when comparing against msg.sig at the

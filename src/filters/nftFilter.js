@@ -78,9 +78,10 @@ export function saveNftFilters(filters) {
 
 const isTrue = (v) => v === "1" || v === 1 || v === true;
 
-// Cheap re-check of floor price right before a buy executes — same role as
-// filters/filter.js's checkFreshLiquidity, catching a floor collapse in the
-// gap between the original filter pass and the on-chain purchase.
+// Cheap re-check of floor price right before a buy executes, catching a floor
+// collapse in the gap between the original filter pass and the on-chain
+// purchase. That gap is not theoretical: a call, a queue wait and a fill can
+// be minutes apart, and the number the decision was made on is stale by then.
 export async function checkFreshFloorPrice(slug) {
   const filters = loadNftFilters();
   const stats = await getCollectionStats(slug).catch(() => null);

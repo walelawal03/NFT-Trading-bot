@@ -337,9 +337,9 @@ export const CHAINS = {
     // / 1000+ transactions (the other PairCreated-emitting candidate found
     // during verification had only 6 txs from 2 callers — an unrelated,
     // essentially unused contract, not the real factory). This contract's
-    // own getPair()/factory() getters revert though — swapExecutor.js's
-    // hasRealPair() is written to tolerate that rather than assume "no pair
-    // exists" from an unsupported call.
+    // own getPair()/factory() getters revert though, so anything reading them
+    // has to tolerate an unsupported call rather than conclude "no pair
+    // exists" from it.
     routerAddress: "0xDFEf2F90F7E52609cC89b80b68Ff6a1C86C4ddc4",
     // Not onboarded — confirmed via a direct API call returning code 2022
     // "The main chain is not supported". Same fallback posture as Robinhood

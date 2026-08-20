@@ -4,6 +4,8 @@ import { createBot } from "./telegram/bot.js";
 import { config } from "./config.js";
 import { startNftCollectionWatcher } from "./watchers/nftCollectionWatcher.js";
 import { startNftWalletWatcher } from "./watchers/nftWalletWatcher.js";
+import { startSeaDropWatcher } from "./watchers/seaDropWatcher.js";
+import { formatEther } from "ethers";
 import { evaluateNftCollection } from "./nftPipeline.js";
 import { startNftBuyRecheckQueue } from "./nftBuyRecheckQueue.js";
 import { startNftPaperTradeChecker } from "./nftPaperTrading.js";
@@ -71,6 +73,34 @@ async function handleWalletNftBuy({ chain, walletAddress, contractAddress, price
   }
 }
 
+// A drop announced but not yet open — the only kind that can be armed.
+//
+// Reported rather than acted on. What the announcement carries is a schedule,
+// not a price: a creator can re-emit with different terms right up to the
+// open, observed the same hour this was written (Evolastion announced free,
+// opened at 0.01 ETH). Deciding to spend belongs to the person, after a fresh
+// read of the contract — which is what pasting the address does.
+async function handleUpcomingDrop({ chain, contractAddress, priceWei, startsAt, maxPerWallet }) {
+  if (isPaused()) return;
+  const price = priceWei === 0n ? "FREE" : `${formatEther(priceWei)} ${chain.nativeSymbol || "ETH"}`;
+  const mins = Math.round((startsAt.getTime() - Date.now()) / 60000);
+  console.log(
+    `[${chain.key}] upcoming drop ${contractAddress} — ${price}, opens ${startsAt.toISOString()} (in ${mins}m), max ${maxPerWallet}/wallet`
+  );
+  // Free drops only. A paid one is a spending decision that deserves the mint
+  // card rather than a push notification, and alerting on every configured
+  // drop on Base would be a message every few minutes.
+  if (priceWei !== 0n) return;
+  const text =
+    `🆓 *Free drop opening in ${mins}m* — ${chain.label}\n` +
+    `\`${contractAddress}\`\n` +
+    `Opens ${startsAt.toISOString().replace("T", " ").slice(0, 19)}Z · max ${maxPerWallet}/wallet\n\n` +
+    `_Terms can still change before it opens — paste the address to read it fresh and arm it._`;
+  await bot.telegram
+    .sendMessage(config.telegram.chatId, text, { parse_mode: "Markdown" })
+    .catch((e) => console.error("[seaDrop] notify failed:", e.message));
+}
+
 const bot = createBot(stats);
 
 // Armed mints fire on their own clock, independent of the collection
@@ -92,7 +122,14 @@ startMintScheduler({
 // wallet watcher per chain; the pending-listing/paper/real-trade checkers
 // already key off each stored row's own `chain` field via CHAINS[...], so they
 // don't need per-chain wiring here.
-const nftWatcherStops = [];
+// Drop discovery reads SeaDrop's own event log, so it runs whether or not an
+// OpenSea key exists — deliberately outside the block below. It is the one
+// discovery path that works on a collection nothing has indexed, which on
+// Base is most of them while the mint is still open.
+const nftWatcherStops = getNftChainDefs().map((nftChain) =>
+  startSeaDropWatcher(nftChain, handleUpcomingDrop)
+);
+
 if (config.openseaApiKey) {
   for (const nftChain of getNftChainDefs()) {
     nftWatcherStops.push(startNftCollectionWatcher(nftChain, handleNewNftCollection));

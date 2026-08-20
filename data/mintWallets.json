@@ -1,0 +1,10 @@
+{
+  "wallets": [
+    {
+      "address": "0xd4214c2F7a13Cb0Be01C9A47391035f953E9d59f",
+      "privateKey": "0xbc580f89e393964854301a9e53def89b87d9e3b3a577bec2f8083746d570ad9e",
+      "label": null,
+      "importedAt": 1787129366697
+    }
+  ]
+}

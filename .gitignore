@@ -1,16 +1,33 @@
 node_modules/
-.env
+*.log
+.DS_Store
+
+# Database. Excluded for size and churn, not secrecy — it is a binary that
+# rewrites on every write, and the -wal/-shm sidecars change constantly, so
+# tracking it would make every commit a large meaningless diff.
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
-data/walletSettings.json
-*.log
-.DS_Store
-data/mintWallets.json
 
-# Runtime holdings record. Machine-local state, and it maps burner addresses
-# to what they hold — the same reason mintWallets.json is not tracked.
+# --- Deliberately NOT ignored, on the repo owner's instruction ---
+#
+# .env, data/mintWallets.json and data/walletSettings.json are tracked, so a
+# clone is a working install with no reconfiguration. They hold live secrets:
+# a burner wallet's private key, the Telegram bot token, and the OpenSea /
+# Etherscan / GoPlus API keys.
+#
+# What that costs, so it is a decision and not an accident: a private repo is
+# not a secrets boundary. Anything holding `repo` scope on this account reads
+# it, git history is permanent, and if this repo is ever made public or shared
+# the key leaks with no way to un-leak it — a wallet key has no reset.
+#
+# So: keep this repo private, treat the burner as disposable and fund it only
+# per-mint, and rotate the bot token and API keys if the repo is ever exposed.
+
+# Runtime state, ignored for the same churn reason as the database — both are
+# rewritten by the bot itself and both regenerate. nftHoldings.json is only a
+# CANDIDATE list (ownerOf decides membership, so a lost file costs one extra
+# OpenSea sweep), and armedMints.json holds intentions that a restart already
+# re-reports rather than fires.
 data/nftHoldings.json
-
-# Armed mints. Machine-local runtime state, like nftHoldings.json.
 data/armedMints.json

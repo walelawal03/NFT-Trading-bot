@@ -16,6 +16,50 @@ import { usdSuffix } from "../mint/nativePrice.js";
 const eth = (n) =>
   n == null ? "?" : n >= 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : Number(n.toPrecision(3)).toString();
 
+// Floors that are already denominated in dollars.
+//
+// USDG is Robinhood Chain's own stablecoin and the common listing currency
+// there — two of the three collections in the first real wallet were priced
+// in it. The first version of this fix correctly stopped reading 1 USDG as
+// 1 ETH, and then reported the collection as "not counted", which is a
+// technically-true answer to a question nobody asked: the holder wants to
+// know what their NFTs are worth, and one USDG is one dollar.
+//
+// Held at 1.0 rather than fetched. A stablecoin can depeg, but a depeg is a
+// few percent and the alternative here was an error of 2,300x. If one of
+// these ever breaks badly enough that a portfolio readout is misleading, that
+// is a headline, not a rounding problem.
+const USD_STABLECOINS = new Map([
+  ["USDG", 1],
+  ["USDC", 1],
+  ["USDT", 1],
+  ["DAI", 1],
+  ["PYUSD", 1],
+]);
+
+/**
+ * What one item of this collection is worth in dollars, or null if unknowable.
+ *
+ * The two paths are deliberately separate: an ETH floor needs a live ETH/USD
+ * rate that may not have loaded, while a stablecoin floor needs nothing at
+ * all and must still work when that rate is missing.
+ */
+function floorUsd(group, ethUsd) {
+  if (group.floorEth != null) return ethUsd ? group.floorEth * ethUsd : null;
+  const rate = group.floorSymbol ? USD_STABLECOINS.get(group.floorSymbol.toUpperCase()) : null;
+  if (rate != null && group.floorRaw != null) return group.floorRaw * rate;
+  return null;
+}
+
+const usd = (n) =>
+  n == null
+    ? null
+    : n >= 1000
+      ? `$${n.toFixed(0)}`
+      : n >= 1
+        ? `$${n.toFixed(2)}`
+        : `$${n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "")}`;
+
 // Telegram rejects the WHOLE message over 4096 characters, so the list is
 // budgeted rather than trusted to be short. A fixed collection count is not
 // enough on its own: collection names come from the contract and token id
@@ -69,33 +113,56 @@ export function buildHoldingsText({ holdings, ethUsd = null }) {
   }
 
   const totalTokens = groups.reduce((n, g) => n + g.tokens.length, 0);
+
+  // The total is in DOLLARS, not ether, because the holdings are not all
+  // denominated in ether. Summing an ETH total and then footnoting "1 priced
+  // in USDG, not counted" answers a different question from the one being
+  // asked: what is this worth. Dollars is the only unit every floor can be
+  // expressed in, so it is the unit the headline uses.
+  //
   // Only priced collections contribute. A collection with no floor is worth
   // an unknown amount, not zero, and adding zero for it would understate the
   // total while looking precise.
-  const pricedGroups = groups.filter((g) => g.floorEth != null);
-  const valueEth = pricedGroups.reduce((sum, g) => sum + g.floorEth * g.tokens.length, 0);
+  const valued = groups
+    .map((g) => ({ g, usd: floorUsd(g, ethUsd) }))
+    .filter((x) => x.usd != null);
+  const totalUsd = valued.reduce((sum, x) => sum + x.usd * x.g.tokens.length, 0);
+  // Still shown alongside, since the sell path prices in ETH and a holder
+  // reasonably wants both.
+  const ethGroups = groups.filter((g) => g.floorEth != null);
+  const valueEth = ethGroups.reduce((sum, g) => sum + g.floorEth * g.tokens.length, 0);
+  const unpriced = groups.length - valued.length;
 
   const lines = [
     `🖼 *Your NFTs — ${totalTokens} across ${groups.length} collection${groups.length === 1 ? "" : "s"}*`,
   ];
 
-  // "Unpriced" used to cover two different situations, and merging them is
-  // how a USDG floor got silently added to an ETH total. A collection with no
-  // listings at all is unknown; a collection priced in another currency is
-  // known and simply not addable here. The header says which.
-  const otherCurrency = groups.filter((g) => g.floorEth == null && g.floorRaw != null && g.floorSymbol);
-  const unpriced = groups.length - pricedGroups.length - otherCurrency.length;
+  // Anything with a floor at all, in any currency — distinct from `valued`,
+  // which additionally requires that we can express it in dollars.
+  const stableGroups = groups.filter((g) => g.floorEth == null && g.floorRaw != null && g.floorSymbol);
+  const anyPriced = ethGroups.length > 0 || stableGroups.length > 0;
+  const notPriced = groups.length - ethGroups.length - stableGroups.length;
 
-  if (pricedGroups.length) {
-    const notes = [];
-    if (unpriced) notes.push(`${unpriced} unpriced`);
-    if (otherCurrency.length) notes.push(`${otherCurrency.length} priced in ${[...new Set(otherCurrency.map((g) => g.floorSymbol))].join("/")}`);
+  // Dollars lead ONLY when every priced collection can be expressed in them.
+  // Otherwise the headline is a partial sum wearing a total's clothes: with no
+  // ETH/USD rate loaded, a wallet holding 0.002 ETH and 1 USDG of floor
+  // reported "Value at floor: $1.00 (0.002 ETH)", which reads as though the
+  // ether were included in the dollar figure. It was not.
+  const allPricedValued = valued.length === ethGroups.length + stableGroups.length;
+
+  if (allPricedValued && valued.length && totalUsd > 0) {
+    const ethPart = valueEth > 0 ? ` (${eth(valueEth)} ETH${ethGroups.length < valued.length ? " + stablecoin floors" : ""})` : "";
+    lines.push(`Value at floor: *${usd(totalUsd)}*${ethPart}` + (unpriced ? ` _(${unpriced} unpriced)_` : ""));
+  } else if (anyPriced) {
+    // No ETH/USD rate loaded, so dollars are unavailable — fall back to the
+    // ETH total rather than claiming there are no floor prices. Caught by the
+    // existing tests, which render without a rate: leading with dollars made
+    // a wallet with a known ETH floor report "nothing has resold yet".
     lines.push(
-      `Value at floor: *${eth(valueEth)} ETH*${usdSuffix(valueEth, ethUsd)}` +
-        (notes.length ? ` _(${notes.join(", ")}, not counted)_` : "")
+      `Value at floor: *${eth(valueEth)} ETH*` +
+        (stableGroups.length ? ` _(+${stableGroups.length} priced in ${[...new Set(stableGroups.map((g) => g.floorSymbol))].join("/")})_` : "") +
+        (notPriced ? ` _(${notPriced} unpriced)_` : "")
     );
-  } else if (otherCurrency.length) {
-    lines.push(`_Nothing here has an ETH floor — ${otherCurrency.length} collection${otherCurrency.length === 1 ? " is" : "s are"} priced in ${[...new Set(otherCurrency.map((g) => g.floorSymbol))].join("/")}._`);
   } else {
     lines.push("_No floor prices yet — nothing here has resold on the secondary market._");
   }
@@ -114,21 +181,19 @@ export function buildHoldingsText({ holdings, ethUsd = null }) {
       `${ids.join(", ")}${more > 0 ? ` +${more} more` : ""}`,
     ];
 
+    const unit = floorUsd(group, ethUsd);
     if (group.floorEth != null) {
       const position = group.floorEth * group.tokens.length;
       block.push(
         `Floor ${eth(group.floorEth)} ETH${usdSuffix(group.floorEth, ethUsd)} · position ${eth(position)} ETH${usdSuffix(position, ethUsd)}`
       );
     } else if (group.floorRaw != null && group.floorSymbol) {
-      // Priced, just not in ether. Robinhood collections are frequently listed
-      // in USDG, and showing that as "No floor yet" would hide a real price —
-      // while showing it as ETH valued one token at $2,340 instead of $1.
-      // No USD figure and no position total: converting would need this
-      // token's own price, which nothing here fetches, and guessing is what
-      // caused the bug.
-      block.push(
-        `Floor ${group.floorRaw} ${escapeMd(group.floorSymbol)} · not in ETH, so not counted in the total`
-      );
+      // Priced, just not in ether. Showing this as "No floor yet" would hide a
+      // real price; showing it as ETH valued one token at $2,340 instead of
+      // $1. Its own currency plus dollars, which is what the holder wants.
+      const pos = unit != null ? unit * group.tokens.length : null;
+      const dollars = unit != null ? ` (~${usd(unit)}) · position ${usd(pos)}` : " · not convertible to a total";
+      block.push(`Floor ${group.floorRaw} ${escapeMd(group.floorSymbol)}${dollars}`);
     } else {
       block.push("No floor yet");
     }

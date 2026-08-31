@@ -959,6 +959,17 @@ export function createBot(stats) {
         "plaintext on this machine, the same trust boundary as the trading wallet.",
       ].join("\n");
     }
+    const lowBalanceWei = 1000000000000000n;
+    const chainSummary = getNftChainKeys().map((key) => {
+      const balList = wallets
+        .map((w) => balances.get(`${w.address}:${key}`))
+        .filter((bal) => bal != null);
+      const funded = balList.filter((bal) => bal > 0n).length;
+      const ready = balList.filter((bal) => bal >= lowBalanceWei).length;
+      const lowest = balList.length ? balList.reduce((min, bal) => (bal < min ? bal : min), balList[0]) : null;
+      const lowCount = balList.filter((bal) => bal > 0n && bal < lowBalanceWei).length;
+      return `• ${key}: ${funded}/${wallets.length} funded${ready ? `, ${ready} above 0.001 ETH` : ""}${lowCount ? `, ${lowCount} low` : ""}${lowest != null ? `, low ${Number(formatEther(lowest)).toFixed(5)} ETH` : ""}`;
+    });
     const fmtBal = (w) =>
       getNftChainKeys()
         .map((key) => {
@@ -969,6 +980,8 @@ export function createBot(stats) {
 
     return [
       `💼 *Mint wallets* (${wallets.length})`,
+      "",
+      ...chainSummary,
       "",
       ...wallets.flatMap((w, i) => [
         `${i + 1}. \`${w.address}\``,

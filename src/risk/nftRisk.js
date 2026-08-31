@@ -22,6 +22,13 @@ const WEIGHTS = {
 const NO_DATA_FACTOR = 0.3;
 
 const isTrue = (v) => v === "1" || v === 1 || v === true;
+const ONCHAIN_META_ABI = [
+  "function name() view returns (string)",
+  "function totalSupply() view returns (uint256)",
+  "function MAX_SUPPLY() view returns (uint256)",
+  "function maxSupply() view returns (uint256)",
+  "function maxTotalSupply() view returns (uint256)",
+];
 
 // Wall-clock ceiling for the bytecode scan on the automated path. Tighter
 // than the 8s /nftcheck uses on purpose: a human waiting on a Telegram reply
@@ -78,6 +85,25 @@ function scoreMarketplaceLiquidity(collection, stats, flags) {
   else if (vol24h >= 1) points += 4;
   else if (vol24h > 0) points += 1;
   else flags.push("No 24h trading volume");
+
+  if (collection?.createdDate) {
+    const created = Date.parse(collection.createdDate);
+    if (Number.isFinite(created)) {
+      const ageMs = Date.now() - created;
+      if (ageMs < 60 * 60 * 1000) {
+        flags.push("Collection is less than 1 hour old");
+      } else if (ageMs < 24 * 60 * 60 * 1000) {
+        points += 2;
+        flags.push("Collection is less than 24 hours old");
+      } else if (ageMs < 7 * 24 * 60 * 60 * 1000) {
+        points += 4;
+      } else if (ageMs < 30 * 24 * 60 * 60 * 1000) {
+        points += 6;
+      } else {
+        points += 8;
+      }
+    }
+  }
 
   return Math.min(WEIGHTS.marketplaceLiquidity, points);
 }
@@ -162,6 +188,24 @@ async function resolveController(chain, contractAddress, flags) {
   else if (creation.reason === "unsupported_chain") flags.push("Deployer history unavailable (chain not covered by Etherscan or Blockscout)");
   else if (creation.reason !== "no_api_key") flags.push("No owner accessor and no deployer record");
   return null;
+}
+
+async function readOnChainMeta(chain, contractAddress) {
+  const contract = new Contract(contractAddress, ONCHAIN_META_ABI, getProvider(chain));
+  const [name, totalSupply, maxSupplyAnswer] = await Promise.all([
+    contract.name().catch(() => null),
+    contract.totalSupply().catch(() => null),
+    contract
+      .MAX_SUPPLY()
+      .catch(() => null)
+      .then((v) => (v != null ? v : contract.maxSupply().catch(() => null)))
+      .then((v) => (v != null ? v : contract.maxTotalSupply().catch(() => null))),
+  ]);
+  return {
+    name,
+    totalSupply: totalSupply == null ? null : Number(totalSupply),
+    maxSupply: maxSupplyAnswer == null ? null : Number(maxSupplyAnswer),
+  };
 }
 
 // Reads a controller's REALIZED record — what actually happened to the
@@ -257,9 +301,10 @@ export async function computeNftRiskScore(chain, contractAddress) {
     detectNftDangerousFunctions(chain, contractAddress, { budgetMs: SCAN_BUDGET_MS }).catch(() => null),
   ]);
   const stats = slug ? await getCollectionStats(slug).catch(() => null) : null;
+  const onchainMeta = await readOnChainMeta(chain, contractAddress).catch(() => null);
 
-  const name = collection?.name || contractInfo?.name || null;
-  const totalSupply = collection?.totalSupply ?? null;
+  const name = collection?.name || contractInfo?.name || onchainMeta?.name || null;
+  const totalSupply = collection?.totalSupply ?? onchainMeta?.totalSupply ?? null;
 
   // A thrown scan is not a clean scan. assessNftContractRisk already treats
   // checked:false as unknown-and-penalised, so hand it a shaped failure

@@ -1,3 +1,4 @@
+import { config } from "../config.js";
 import { CHAINS } from "../chains.js";
 import { getNftChainKeys } from "../nftChains.js";
 import { detectNftMint } from "../mint/nftMintDetect.js";
@@ -56,13 +57,13 @@ export function parsePastedTarget(text) {
  * mint card for, and a missing one renders as absent rather than blocking or
  * throwing. Nothing downstream reads them to decide anything.
  */
-export async function loadCardExtras(chain, { slug = null, contractAddress = null } = {}) {
+export async function loadCardExtras(chain, { slug = null, contractAddress = null, allowOpenSea = true } = {}) {
   const { getProvider } = await import("../wallet.js");
   const { listMintWallets } = await import("../mint/mintWallets.js");
   const { getEthUsd } = await import("../mint/nativePrice.js");
-  const { getCollectionStats, getBestListingBySlug } = await import("../risk/opensea.js");
 
   const first = listMintWallets()[0] ?? null;
+  const openSea = allowOpenSea ? await import("../risk/opensea.js") : null;
 
   // Market data is only meaningful once a collection has traded, and it comes
   // from OpenSea — so it is fetched alongside everything else and every piece
@@ -71,8 +72,8 @@ export async function loadCardExtras(chain, { slug = null, contractAddress = nul
   const [walletBalanceWei, ethUsd, stats, listing] = await Promise.all([
     first ? getProvider(chain).getBalance(first.address).catch(() => null) : Promise.resolve(null),
     getEthUsd().catch(() => null),
-    slug ? getCollectionStats(slug).catch(() => null) : Promise.resolve(null),
-    slug ? getBestListingBySlug(slug).catch(() => null) : Promise.resolve(null),
+    allowOpenSea && slug ? openSea.getCollectionStats(slug).catch(() => null) : Promise.resolve(null),
+    allowOpenSea && slug ? openSea.getBestListingBySlug(slug).catch(() => null) : Promise.resolve(null),
   ]);
   return { walletBalanceWei, ethUsd, stats, listing };
 }
@@ -170,6 +171,8 @@ export async function handlePastedTarget(ctx, text) {
     target = { ...target, ...resolved, chainKey: target.chainKey ?? resolved.chainKey };
   }
 
+  const allowOpenSea = Boolean(config.openseaApiKey);
+
   const chainKeys = await resolveChain(target.address, target.chainKey);
   if (chainKeys.length === 0) {
     await ctx.reply(
@@ -204,12 +207,12 @@ export async function handlePastedTarget(ctx, text) {
         // asset path does not. Deliberately best-effort and last: it is the
         // one OpenSea call in this flow, and a fresh drop OpenSea has not
         // indexed must still get its card without waiting on a miss.
-        const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
+        const openseaSlug = target.slug ?? (allowOpenSea ? await resolveSlugForContract(chain.key, target.address) : null);
         // Concurrent: the exit probe is one eth_call and the extras are
         // OpenSea round trips, so overlapping them makes the probe free in
         // wall-clock terms. Neither can fail the card.
         const [extras, roundTrip] = await Promise.all([
-          loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address }),
+          loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address, allowOpenSea }),
           loadRoundTrip(chain, { detect, contractAddress: target.address }),
         ]);
         const config = mintSession.startSession(ctx.chat.id, {
@@ -228,8 +231,8 @@ export async function handlePastedTarget(ctx, text) {
         // The mint is over. That is exactly when the secondary market becomes
         // the answer, so this path loads floor/volume/listing and offers a
         // buy rather than just reporting that you are too late.
-        const openseaSlug = target.slug ?? (await resolveSlugForContract(chain.key, target.address));
-        const extras = await loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address });
+        const openseaSlug = target.slug ?? (allowOpenSea ? await resolveSlugForContract(chain.key, target.address) : null);
+        const extras = await loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address, allowOpenSea });
         const config = mintSession.startSession(ctx.chat.id, {
           chain,
           contractAddress: target.address,

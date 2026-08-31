@@ -69,6 +69,7 @@ export const CHAINS = {
     label: "Ethereum",
     wssEnvVar: "ETHEREUM_WSS_RPC",
     httpEnvVar: "ETHEREUM_HTTP_RPC",
+    httpRpcUrls: ["https://ethereum-rpc.publicnode.com"],
     // publicnode refuses 1000-block eth_getLogs here the same way it does on
     // BSC (verified 2026-08-16), so log polling needs somewhere else to land.
     // mevblocker serves those reads, but it is a transaction-privacy relay

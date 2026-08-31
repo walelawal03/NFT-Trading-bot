@@ -1,6 +1,7 @@
 {
   "enabled": [
     "base",
+    "ethereum",
     "robinhood"
   ]
 }

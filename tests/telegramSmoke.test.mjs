@@ -102,6 +102,7 @@ await t("/nftcheck rejects a malformed address", async () => {
 await t("/nftcheck names the chains it accepts and its default", async () => {
   const out = texts(await send("/nftcheck"));
   assert.match(out, /base/);
+  assert.match(out, /ethereum/);
   assert.match(out, /robinhood/);
   assert.match(out, /defaults to base/);
 });
@@ -112,8 +113,14 @@ await t("/nftcheck on an address with no code answers, and never implies a pass"
   assert.ok(!/PASSES HARD GATE/i.test(out), `an EOA must not read as a pass:\n${out}`);
 });
 
-await t("/nftcheck rejects an unknown chain by name", async () => {
+await t("/nftcheck accepts ethereum mainnet as a chain", async () => {
   const out = texts(await send("/nftcheck ethereum 0x000000000000000000000000000000000000dEaD"));
+  assert.ok(!/Unknown chain/i.test(out), `ethereum should now be accepted:\n${out}`);
+  assert.match(out, /Reading contract/, "ethereum should go through the scan path");
+});
+
+await t("/nftcheck rejects an unknown chain by name", async () => {
+  const out = texts(await send("/nftcheck mainnet 0x000000000000000000000000000000000000dEaD"));
   assert.match(out, /Scan failed: Unknown chain|Usage/, `expected a chain error, got:\n${out}`);
 });
 
@@ -240,7 +247,7 @@ await t("/mint rejects a bad address and names the chains", async () => {
 });
 
 await t("/mint refuses a chain this bot does not watch", async () => {
-  const out = texts(await send("/mint ethereum 0x000000000000000000000000000000000000dEaD"));
+  const out = texts(await send("/mint mainnet 0x000000000000000000000000000000000000dEaD"));
   assert.match(out, /Unknown chain/);
 });
 

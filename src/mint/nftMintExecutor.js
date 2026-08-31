@@ -27,6 +27,8 @@ const SEADROP_VIEW_ABI = [
 // someone else's behalf, which requires the payer to be registered and
 // reverts when it isn't.
 const MINTER_IS_PAYER = "0x0000000000000000000000000000000000000000";
+const DEFAULT_SEND_FEE_MULTIPLIER = 1.25;
+const RETRY_SEND_FEE_MULTIPLIER = 1.5;
 
 /**
  * Resolves the fee recipient the mint must pay.
@@ -42,6 +44,24 @@ export async function resolveFeeRecipient(chain, contractAddress) {
   const allowed = await seadrop.getAllowedFeeRecipients(contractAddress).catch(() => null);
   if (!allowed || allowed.length === 0) return null;
   return allowed[0];
+}
+
+function isNonceError(message) {
+  return /nonce|already known|known transaction|replacement transaction underpriced/i.test(String(message || ""));
+}
+
+function isFeeError(message) {
+  return /underpriced|max fee per gas less than block base fee|fee cap less than block base fee|transaction underpriced|base fee/i.test(
+    String(message || "")
+  );
+}
+
+async function resolveLegacyGasPrice(provider, multiplier = DEFAULT_SEND_FEE_MULTIPLIER) {
+  const fee = await provider.getFeeData();
+  const baseline = fee.gasPrice ?? fee.maxFeePerGas ?? fee.maxPriorityFeePerGas ?? null;
+  if (baseline == null) return null;
+  const pct = BigInt(Math.max(100, Math.round(multiplier * 100)));
+  return (baseline * pct) / 100n;
 }
 
 /**
@@ -230,37 +250,6 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
 
   const provider = getProvider(chain);
 
-  // Price the transaction explicitly, the same way prepareSignedMints does.
-  //
-  // Left unset, ethers populates EIP-1559 fields and sets maxFeePerGas to
-  // roughly twice the base fee. The node then checks the balance against that
-  // ceiling, not against what the transaction will actually cost — so a mint
-  // that needed 0.000503 ETH was rejected against a 0.000506 balance for
-  // wanting 0.000507. Observed exactly that, short by 0.47 microether.
-  //
-  // maxPriorityFeePerGas is 0 on this chain, so legacy pricing is not
-  // underpricing anything; it just stops the balance check reserving headroom
-  // that will never be spent.
-  // Priced between two failure modes, both of which have happened here.
-  //
-  // Too low and the node rejects outright: "max fee per gas less than block
-  // base fee, maxFeePerGas 20208000 baseFee 20406000" — the base fee ticked
-  // up in the seconds between reading it and sending, because the raw
-  // gasPrice carried no headroom at all.
-  //
-  // Too high and the BALANCE check refuses: the node reserves
-  // gasLimit * price before execution, so ethers' default EIP-1559 ceiling of
-  // twice the base fee rejected a mint the wallet could actually afford, short
-  // by 0.47 microether.
-  //
-  // 1.25x clears ordinary drift while reserving a quarter more than the
-  // transaction will spend, rather than double. The unused portion is never
-  // charged — overpaying the ceiling costs nothing, being under it costs the
-  // mint.
-  const feeData = await provider.getFeeData();
-  const baseline = feeData.gasPrice ?? feeData.maxFeePerGas ?? null;
-  const gasPrice = baseline == null ? null : (baseline * 125n) / 100n;
-
   const results = await Promise.all(
     keys.map(async (privateKey) => {
       const wallet = new Wallet(privateKey, provider);
@@ -288,8 +277,36 @@ export async function executeMint(chain, { detect, contractAddress, quantity, pr
           return { address, ok: true, stage: "dry-run", gasLimit, valueWei: call.value, to: call.to };
         }
 
-        const tx = await wallet.sendTransaction({ ...call, gasLimit, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
-        return { address, ok: true, stage: "sent", txHash: tx.hash, valueWei: call.value };
+        const sendWithFee = async (multiplier) => {
+          const gasPrice = await resolveLegacyGasPrice(provider, multiplier);
+          return wallet.sendTransaction({ ...call, gasLimit, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
+        };
+
+        try {
+          const tx = await sendWithFee(DEFAULT_SEND_FEE_MULTIPLIER);
+          return { address, ok: true, stage: "sent", txHash: tx.hash, valueWei: call.value };
+        } catch (err) {
+          const reason = describeSendError(err);
+          if (!(isNonceError(reason) || isFeeError(reason))) {
+            return { address, ok: false, stage: "send", reason };
+          }
+
+          try {
+            const nonce = await provider.getTransactionCount(address, "pending");
+            const gasPrice = await resolveLegacyGasPrice(provider, RETRY_SEND_FEE_MULTIPLIER);
+            const tx = await wallet.sendTransaction({ ...call, gasLimit, nonce, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
+            return {
+              address,
+              ok: true,
+              stage: "sent-resigned",
+              txHash: tx.hash,
+              valueWei: call.value,
+              note: isNonceError(reason) ? "nonce moved, re-signed" : "fee bumped and re-sent",
+            };
+          } catch (err2) {
+            return { address, ok: false, stage: "send", reason: describeSendError(err2) };
+          }
+        }
       } catch (err) {
         return { address, ok: false, stage: "send", reason: describeSendError(err) };
       }
@@ -425,10 +442,7 @@ export async function prepareSignedMints(chain, { detect, contractAddress, quant
 
   const provider = getProvider(chain);
   const call = await buildMintCall(chain, { detect, contractAddress, quantity, priceOverrideWei });
-  const [fee, network] = await Promise.all([provider.getFeeData(), provider.getNetwork()]);
-
-  const mult = BigInt(Math.max(1, Math.round(feeMultiplier)));
-  const gasPrice = (fee.gasPrice ?? 0n) * mult;
+  const [network, gasPrice] = await Promise.all([provider.getNetwork(), resolveLegacyGasPrice(provider, feeMultiplier)]);
 
   const signed = await Promise.all(
     keys.map(async (privateKey) => {
@@ -490,13 +504,13 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
 
       const t0 = Date.now();
       try {
-        const tx = await provider.broadcastTransaction(s.raw);
-        return { address: s.address, ok: true, stage: "sent", txHash: tx.hash, valueWei: s.valueWei, sendMs: Date.now() - t0 };
-      } catch (err) {
-        const reason = describeSendError(err);
-        if (!isNonceError(reason) || !call) {
-          return { address: s.address, ok: false, stage: "broadcast", reason };
-        }
+          const tx = await provider.broadcastTransaction(s.raw);
+          return { address: s.address, ok: true, stage: "sent", txHash: tx.hash, valueWei: s.valueWei, sendMs: Date.now() - t0 };
+        } catch (err) {
+          const reason = describeSendError(err);
+          if ((!isNonceError(reason) && !isFeeError(reason)) || !call) {
+            return { address: s.address, ok: false, stage: "broadcast", reason };
+          }
 
         // Re-sign against the current nonce. Keys are fetched here rather than
         // carried on the armed entry, so nothing holds key material while a
@@ -507,10 +521,12 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
 
           const wallet = new Wallet(key, provider);
           const nonce = await provider.getTransactionCount(s.address, "pending");
-          const tx = await wallet.sendTransaction({ ...call, nonce, gasLimit: s.gasLimit, gasPrice: s.gasPrice });
+          const gasPrice = await resolveLegacyGasPrice(provider, isFeeError(reason) ? RETRY_SEND_FEE_MULTIPLIER : DEFAULT_SEND_FEE_MULTIPLIER);
+          const tx = await wallet.sendTransaction({ ...call, nonce, gasLimit: s.gasLimit, ...(gasPrice != null ? { gasPrice, type: 0 } : {}) });
           return {
             address: s.address, ok: true, stage: "sent-resigned", txHash: tx.hash,
-            valueWei: s.valueWei, sendMs: Date.now() - t0, note: `nonce moved (${s.nonce} -> ${nonce}), re-signed`,
+            valueWei: s.valueWei, sendMs: Date.now() - t0,
+            note: isFeeError(reason) ? "fee bumped and re-signed" : `nonce moved (${s.nonce} -> ${nonce}), re-signed`,
           };
         } catch (err2) {
           return { address: s.address, ok: false, stage: "resign", reason: describeSendError(err2) };

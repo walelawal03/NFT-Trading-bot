@@ -14,12 +14,12 @@ export const NFT_CAPABLE_CHAIN_KEYS = ["ethereum", "base", "arbitrum", "robinhoo
 // Which chains NFT features (collection sniping, wallet copy-trading,
 // paper/real trading) are active on — deliberately separate from the token
 // side's chain toggles, so e.g. Base can run tokens-only while Robinhood
-// runs both. Seeded once from the NFT_CHAINS env var (default
-// "base,robinhood") on first run; data/nftChains.json is the source of
-// truth after that, edited live from the Chains menu — the same
+// runs both. Seeded once from the NFT_CHAINS env var (or legacy CHAINS alias;
+// default "base,ethereum,robinhood") on first run; data/nftChains.json is the
+// source of truth after that, edited live from the Chains menu — the same
 // persistence pattern as chainSettings.js on the token side.
 function seedFromEnv() {
-  const envChains = (process.env.NFT_CHAINS || "base,robinhood")
+  const envChains = (process.env.NFT_CHAINS || process.env.CHAINS || "base,ethereum,robinhood")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((key) => NFT_CAPABLE_CHAIN_KEYS.includes(key));

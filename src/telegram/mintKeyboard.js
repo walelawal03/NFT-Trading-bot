@@ -24,6 +24,16 @@ const fmt = (wei) => (wei == null ? "unknown" : `${Number(formatEther(wei))}`);
 // for; a floor of 0.000042 still needs its digits.
 const eth = (n) => (n == null ? "?" : n >= 0.01 ? n.toFixed(4).replace(/0+$/, "").replace(/\.$/, "") : Number(n.toPrecision(3)).toString());
 
+function mintStatusLine(detect) {
+  if (!detect.checked) return `⚪️ READ FAILED · ${detect.reason || "Could not read this contract"}`;
+  if (detect.soldOut) return "🔴 SOLD OUT";
+  if (detect.mintable === true) return "🟢 MINTING NOW";
+  if (detect.phase?.startsAt && detect.phase.startsAt.getTime() > Date.now()) return "🕒 NOT OPEN YET";
+  if (!detect.mintVia) return "🔴 NO RECOGNISED MINT ENTRYPOINT";
+  if (detect.mintable === false) return "🔴 NOT MINTABLE";
+  return "⚪️ STATE UNKNOWN";
+}
+
 function fmtWhen(date) {
   if (!date) return null;
   const ms = date.getTime() - Date.now();
@@ -43,15 +53,7 @@ export function buildMintConfigText(config) {
   const total = totalCostWei(config);
   const walletsAvailable = countMintWallets();
 
-  const state = detect.soldOut
-    ? "🔴 SOLD OUT"
-    : detect.mintable === true
-      ? "🟢 MINTING NOW"
-      : detect.phase?.startsAt && detect.phase.startsAt.getTime() > Date.now()
-        ? "🕒 NOT OPEN YET"
-        : detect.mintable === false
-          ? "🔴 NOT MINTABLE"
-          : "⚪️ STATE UNKNOWN";
+  const state = mintStatusLine(detect);
 
   const supply =
     detect.totalSupply != null && detect.maxSupply != null
@@ -74,6 +76,9 @@ export function buildMintConfigText(config) {
   const closes = fmtWhen(detect.phase?.endsAt);
   if (opens) lines.push(`• Opens: ${opens}`);
   if (closes) lines.push(`• Closes: ${closes}`);
+  if (!detect.checked && detect.reason) {
+    lines.push(`• Read issue: ${detect.reason}`);
+  }
 
   const wallets = Math.max(config.wallets, 1);
   const totalEth = total == null ? null : Number(formatEther(total));
@@ -156,8 +161,11 @@ export function buildMintConfigText(config) {
   // Anything that would stop the mint goes ABOVE the buttons. Someone about
   // to tap CONFIRM should already know it cannot work.
   const blockers = [];
+  if (!detect.checked) blockers.push("contract read failed");
   if (detect.soldOut) blockers.push("sold out");
-  if (detect.mintable === false && !detect.soldOut) blockers.push("phase not open");
+  if (detect.mintable === false && !detect.soldOut && detect.phase?.startsAt && detect.phase.startsAt.getTime() > Date.now()) blockers.push("not open yet");
+  if (detect.mintable === false && !detect.soldOut && !detect.phase?.startsAt && detect.mintVia) blockers.push("phase not open");
+  if (detect.mintVia == null) blockers.push("no recognised mint entrypoint");
   if (walletsAvailable === 0) blockers.push("no wallets loaded");
   if (unit == null) blockers.push("price unknown");
   if (blockers.length) lines.push("", `⛔️ *Can't mint:* ${blockers.join(", ")}`);

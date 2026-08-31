@@ -8,7 +8,8 @@ code. So it doesn't compete on speed. It competes on **selection** (not minting
 rugs), **exits** (most mint bots have none), and **chain timing** (young chains
 where bot infrastructure hasn't arrived yet).
 
-Default chains are Base and Robinhood Chain. Ethereum is deliberately not one.
+Default chains are Base, Ethereum mainnet, and Robinhood Chain.
+The app reads `NFT_CHAINS`; `CHAINS` is accepted as a legacy alias in `.env`.
 
 ## What it does today
 

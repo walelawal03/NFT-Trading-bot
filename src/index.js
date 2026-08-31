@@ -258,10 +258,38 @@ if (config.openseaApiKey) {
 
 // bot.launch() only resolves after bot.stop() is called (it awaits the
 // polling loop itself), so confirm startup via the onLaunch callback instead.
-bot.launch({}, () => console.log(`Telegram bot launched as @${bot.botInfo?.username}.`)).catch((err) => {
-  console.error("Telegram bot crashed:", err.message);
-  process.exit(1);
-});
+//
+// This does NOT exit on a launch failure. The first version called
+// process.exit(1) here, which turned a transient DNS blip (getaddrinfo
+// ENOTFOUND api.telegram.org, observed 2026-08-27) into a hard crash that
+// burned pm2's restart budget and could leave the bot permanently stopped
+// once the blip passed and the process had already exhausted its restarts.
+// Every other subsystem here (mint scheduler, watchers, outcome tracker)
+// is independent of Telegram and should keep running during one. So: log,
+// back off, and retry until poll() works. bot.botInfo stays null until the
+// first successful connection, which the notify wrappers already tolerate.
+async function launchWithRetry() {
+  const maxAttempts = 10;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await new Promise((resolve, reject) => {
+        bot.launch({}, () => {
+          console.log(`Telegram bot launched as @${bot.botInfo?.username}.`);
+          resolve();
+        }).catch(reject);
+      });
+      return;
+    } catch (err) {
+      const waitMs = Math.min(30_000, attempt * 10_000);
+      console.error(
+        `Telegram launch attempt ${attempt}/${maxAttempts} failed (${err.message}); retrying in ${waitMs}ms`
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+  console.error("Telegram launch failed after all attempts. Polling errors will surface in the watcher logs.");
+}
+launchWithRetry();
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {

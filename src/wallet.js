@@ -50,6 +50,7 @@ export function httpUrlsFor(chain) {
     ...(chain.httpRpcUrls || []),
     derivedHttpFromWss(chain),
   ]);
+  if (!urls.length && chain.key === "ethereum") return ["https://ethereum-rpc.publicnode.com"];
   if (!urls.length) throw new Error(`No RPC configured for ${chain.key} (${chain.httpEnvVar || chain.wssEnvVar})`);
   return urls;
 }

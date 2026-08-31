@@ -20,9 +20,51 @@ export { countMintWallets as walletCount } from "./mintWallets.js";
 // zero, and defaulting unknown to 0 would make every such drop unmintable.
 const clamp = (n, min, max) => Math.max(min, max == null ? n : Math.min(n, max));
 
-export function startSession(chatId, { chain, contractAddress, detect, openseaSlug = null, walletBalanceWei = null, ethUsd = null, stats = null, listing = null, roundTrip = null }) {
+function normalizeWalletAddresses(addresses) {
+  if (!Array.isArray(addresses)) return null;
+  const seen = new Set();
+  const out = [];
+  for (const address of addresses) {
+    const lower = String(address || "").trim().toLowerCase();
+    if (!lower || seen.has(lower)) continue;
+    seen.add(lower);
+    out.push(lower);
+  }
+  return out.length ? out : null;
+}
+
+export function selectedWalletAddresses(config) {
+  return normalizeWalletAddresses(config?.walletAddresses);
+}
+
+export function effectiveWalletCount(config) {
+  const selected = selectedWalletAddresses(config);
+  if (selected) return selected.length;
+  return Math.max(config?.wallets ?? 0, 1);
+}
+
+export function startSession(
+  chatId,
+  {
+    chain,
+    contractAddress,
+    detect,
+    openseaSlug = null,
+    walletBalanceWei = null,
+    ethUsd = null,
+    stats = null,
+    listing = null,
+    roundTrip = null,
+    walletEligibility = null,
+    quantity = null,
+    wallets = null,
+    walletAddresses = null,
+    priceOverrideWei = null,
+  }
+) {
   const maxPerWallet = detect.phase?.maxPerWallet ?? null;
   const walletCount = countMintWallets();
+  const normalizedWalletAddresses = normalizeWalletAddresses(walletAddresses);
 
   const config = {
     chain,
@@ -47,13 +89,15 @@ export function startSession(chatId, { chain, contractAddress, detect, openseaSl
     // and an exit that is blocked today is still someone's call to make with
     // their own money. It is shown loudly and left as a decision.
     roundTrip,
+    walletEligibility,
     // Start at the cap rather than 1: someone who opened this wants the
     // allocation, and the cap is the answer they would tap toward anyway.
-    quantity: maxPerWallet ?? 1,
-    wallets: walletCount > 0 ? 1 : 0,
+    quantity: quantity ?? maxPerWallet ?? 1,
+    wallets: wallets ?? (normalizedWalletAddresses?.length ?? (walletCount > 0 ? 1 : 0)),
+    walletAddresses: normalizedWalletAddresses,
     // null means "use the price the contract reports". An override is only
     // ever an override; it never becomes the source of truth.
-    priceOverrideWei: null,
+    priceOverrideWei,
     startedAt: Date.now(),
   };
   sessions.set(chatId, config);
@@ -85,6 +129,7 @@ export function setQuantityMax(chatId) {
 export function adjustWallets(chatId, delta) {
   const c = sessions.get(chatId);
   if (!c) return null;
+  c.walletAddresses = null;
   c.wallets = clamp(c.wallets + delta, 0, countMintWallets());
   return c;
 }
@@ -114,7 +159,7 @@ export function clearPriceOverride(chatId) {
 export function totalCostWei(config) {
   const unit = config.priceOverrideWei ?? config.detect.phase?.priceWei ?? null;
   if (unit == null) return null;
-  return unit * BigInt(config.quantity) * BigInt(Math.max(config.wallets, 1));
+  return unit * BigInt(config.quantity) * BigInt(effectiveWalletCount(config));
 }
 
 // Direct setters for typed entry. Clamping happens at the call site, which
@@ -130,7 +175,24 @@ export function setQuantity(chatId, n) {
 export function setWalletCount(chatId, n) {
   const c = sessions.get(chatId);
   if (!c) return null;
+  c.walletAddresses = null;
   c.wallets = Math.max(0, Math.min(Math.floor(n), countMintWallets()));
+  return c;
+}
+
+export function setWalletAddresses(chatId, addresses) {
+  const c = sessions.get(chatId);
+  if (!c) return null;
+  const normalized = normalizeWalletAddresses(addresses);
+  c.walletAddresses = normalized;
+  c.wallets = normalized ? normalized.length : c.wallets;
+  return c;
+}
+
+export function clearWalletAddresses(chatId) {
+  const c = sessions.get(chatId);
+  if (!c) return null;
+  c.walletAddresses = null;
   return c;
 }
 

@@ -19,7 +19,7 @@ import {
   getOpenNftPaperTrades,
   getOpenNftRealTrades,
 } from "../store/db.js";
-import { hasWallet, getWalletAddress, getNativeBalance, resolveEnsName, getPrivateKeyForExport } from "../wallet.js";
+import { hasWallet, getWalletAddress, getNativeBalance, resolveEnsName, getPrivateKeyForExport, getProvider } from "../wallet.js";
 import { saveWalletPrivateKey } from "../walletSettings.js";
 import { computeNftRiskScore } from "../risk/nftRisk.js";
 import { detectNftDangerousFunctions, assessNftContractRisk } from "../risk/nftDangerousFunctions.js";
@@ -28,7 +28,7 @@ import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard, mintCardExtra, buildMintResultText, mintResultKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
-import { handlePastedTarget, loadCardExtras } from "./handlePaste.js";
+import { handlePastedTarget, loadCardExtras, loadRoundTrip } from "./handlePaste.js";
 import { executeMint, findMaxMintable, checkWalletEligibility } from "../mint/nftMintExecutor.js";
 import { buyNftCollectionFloor, listNftForSale } from "../execution/nftExecutor.js";
 import { confirmMint } from "../mint/mintResult.js";
@@ -992,6 +992,41 @@ export function createBot(stats) {
     ].join("\n");
   };
 
+  const shortAddress = (address) => `${address.slice(0, 8)}…${address.slice(-4)}`;
+
+  const renderMintWalletPicker = (config) => {
+    const wallets = listMintWallets();
+    const selected = new Set((config.walletAddresses ?? []).map((a) => a.toLowerCase()));
+    const rows = wallets.map((w, i) => [
+      Markup.button.callback(
+        `${selected.has(w.address.toLowerCase()) ? "✅" : "⬜"} #${i + 1} ${shortAddress(w.address)}`,
+        `mint:walletpick:${i}`
+      ),
+    ]);
+    rows.push(
+      [
+        Markup.button.callback("✅ Done", "mint:wallets:done"),
+        Markup.button.callback("↩ Use first N", "mint:wallets:clear"),
+      ],
+      [Markup.button.callback("🔄 Refresh", "mint:wallets:choose")],
+      [Markup.button.callback("🔙 Back", "mint:refresh")],
+    );
+    const choice = config.walletAddresses?.length
+      ? `selected ${config.walletAddresses.length} wallet${config.walletAddresses.length === 1 ? "" : "s"}`
+      : `first ${Math.max(config.wallets, 1)} wallet${Math.max(config.wallets, 1) === 1 ? "" : "s"} in roster order`;
+    return {
+      text: [
+        "💼 *Pick mint wallets*",
+        "",
+        `Current mode: ${choice}`,
+        "",
+        "Tap wallets to toggle them on or off.",
+        "If you do nothing, the bot mints from the first N wallets in roster order.",
+      ].join("\n"),
+      keyboard: Markup.inlineKeyboard(rows),
+    };
+  };
+
   const mintWalletsKeyboard = () =>
     Markup.inlineKeyboard([
       [Markup.button.callback("🆕 Generate a wallet", "mintwallet:generate")],
@@ -1008,13 +1043,13 @@ export function createBot(stats) {
 
   bot.action("menu:mintwallets", async (ctx) => {
     await ctx.answerCbQuery();
-    if (!isAdmin(ctx)) return;
+    if (!isAdmin(ctx)) return ctx.answerCbQuery("Not authorized.", { show_alert: true });
     await safeEdit(ctx, await renderMintWallets(), mintWalletsKeyboard());
   });
 
   bot.action("mintwallet:import", async (ctx) => {
     await ctx.answerCbQuery();
-    if (!isAdmin(ctx)) return;
+    if (!isAdmin(ctx)) return ctx.answerCbQuery("Not authorized.", { show_alert: true });
     setPending(ctx.chat.id, { type: "mintWalletImport" });
     await ctx.reply(
       [
@@ -1080,7 +1115,40 @@ export function createBot(stats) {
   // ── Mint configuration ────────────────────────────────────────────────
   // Every control re-renders from the session, so the numbers on screen are
   // always the ones a mint would use. Nothing here signs or sends.
-  const redrawMint = async (ctx, config) => {
+  const hydrateMintCard = async (chatId, current) => {
+    if (!current) return null;
+    const chain = current.chain;
+    const isMintable = Boolean(current.detect?.mintVia);
+    const [extras, roundTrip, walletEligibility] = await Promise.all([
+      loadCardExtras(chain, { slug: current.openseaSlug, contractAddress: current.contractAddress }),
+      isMintable ? loadRoundTrip(chain, { detect: current.detect, contractAddress: current.contractAddress }) : Promise.resolve(null),
+      isMintable
+        ? checkWalletEligibility(chain, {
+            detect: current.detect,
+            contractAddress: current.contractAddress,
+            quantity: current.quantity,
+            walletAddresses: mintSession.selectedWalletAddresses(current),
+          }).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    return mintSession.startSession(chatId, {
+      chain: current.chain,
+      contractAddress: current.contractAddress,
+      detect: current.detect,
+      openseaSlug: current.openseaSlug,
+      quantity: current.quantity,
+      wallets: current.wallets,
+      walletAddresses: current.walletAddresses,
+      priceOverrideWei: current.priceOverrideWei,
+      roundTrip,
+      walletEligibility,
+      ...extras,
+    });
+  };
+
+  const redrawMint = async (ctx, current) => {
+    if (!current) return ctx.answerCbQuery("That mint session expired — run /mint again.");
+    const config = await hydrateMintCard(ctx.chat.id, current);
     if (!config) return ctx.answerCbQuery("That mint session expired — run /mint again.");
     await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), mintCardExtra(config));
   };
@@ -1154,9 +1222,13 @@ export function createBot(stats) {
         // Carried through refresh: the slug does not change, and losing the
         // balance on refresh would make the card worse each time you tapped it.
         openseaSlug: current.openseaSlug,
+        quantity: current.quantity,
+        wallets: current.wallets,
+        walletAddresses: current.walletAddresses,
+        priceOverrideWei: current.priceOverrideWei,
         ...extras,
       });
-      await safeEdit(ctx, buildMintConfigText(config), mintConfigKeyboard(config), mintCardExtra(config));
+      await redrawMint(ctx, config);
     } catch (err) {
       await ctx.reply(`Couldn't refresh: ${err.message}`);
     }
@@ -1178,6 +1250,63 @@ export function createBot(stats) {
     if (!config) return ctx.reply("That mint session expired — paste the address again.");
     setPending(ctx.chat.id, { type: "mintWalletCount" });
     await ctx.reply(`Send how many wallets to mint from (1–${countMintWallets()}):`);
+  });
+
+  bot.action("mint:wallets:choose", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    const picker = renderMintWalletPicker(config);
+    await safeEdit(ctx, picker.text, picker.keyboard);
+  });
+
+  bot.action(/^mint:walletpick:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    const wallets = listMintWallets();
+    const wallet = wallets[Number(ctx.match[1])];
+    if (!wallet) return ctx.answerCbQuery("That wallet is no longer available.");
+    const current = mintSession.selectedWalletAddresses(config) ?? [];
+    const addr = wallet.address.toLowerCase();
+    const next = current.includes(addr) ? current.filter((a) => a !== addr) : [...current, addr];
+    mintSession.setWalletAddresses(ctx.chat.id, next);
+    const picker = renderMintWalletPicker(mintSession.getSession(ctx.chat.id));
+    await safeEdit(ctx, picker.text, picker.keyboard);
+  });
+
+  bot.action("mint:wallets:done", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    await redrawMint(ctx, config);
+  });
+
+  bot.action("mint:wallets:clear", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    mintSession.clearWalletAddresses(ctx.chat.id);
+    await redrawMint(ctx, mintSession.getSession(ctx.chat.id));
+  });
+
+  bot.action(/^mint:wallets:first:(\d+)$/, async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    const count = Math.max(1, Number(ctx.match[1]));
+    const wallets = listMintWallets().slice(0, count).map((w) => w.address);
+    mintSession.setWalletAddresses(ctx.chat.id, wallets);
+    await redrawMint(ctx, mintSession.getSession(ctx.chat.id));
+  });
+
+  bot.action("mint:wallets:all", async (ctx) => {
+    await ctx.answerCbQuery();
+    const config = mintSession.getSession(ctx.chat.id);
+    if (!config) return ctx.reply("That mint session expired — paste the address again.");
+    const wallets = listMintWallets().map((w) => w.address);
+    mintSession.setWalletAddresses(ctx.chat.id, wallets);
+    await redrawMint(ctx, mintSession.getSession(ctx.chat.id));
   });
 
   bot.action(/^mint:qty:(-?\d+|max)$/, async (ctx) => {
@@ -1211,7 +1340,7 @@ export function createBot(stats) {
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — paste the address again.");
 
-    const walletCount = Math.max(config.wallets, 1);
+    const walletCount = mintSession.effectiveWalletCount(config);
     const quantity = override ?? config.quantity;
 
     await ctx.reply(`Sending ${quantity} x ${walletCount} wallet(s)…`);
@@ -1222,6 +1351,7 @@ export function createBot(stats) {
         quantity,
         priceOverrideWei: config.priceOverrideWei,
         walletCount,
+        walletAddresses: mintSession.selectedWalletAddresses(config),
       });
 
       if (!result.ok && result.results.length === 0) {
@@ -1529,15 +1659,16 @@ export function createBot(stats) {
     const config = mintSession.getSession(ctx.chat.id);
     if (!config) return ctx.reply("That mint session expired — paste the address again.");
 
-    const res = armMint({
-      chain: config.chain,
-      contractAddress: config.contractAddress,
-      detect: config.detect,
-      quantity: config.quantity,
-      walletCount: Math.max(config.wallets, 1),
-      priceOverrideWei: config.priceOverrideWei,
-      chatId: ctx.chat.id,
-    });
+      const res = armMint({
+        chain: config.chain,
+        contractAddress: config.contractAddress,
+        detect: config.detect,
+        quantity: config.quantity,
+        walletCount: mintSession.effectiveWalletCount(config),
+        walletAddresses: mintSession.selectedWalletAddresses(config),
+        priceOverrideWei: config.priceOverrideWei,
+        chatId: ctx.chat.id,
+      });
     if (!res.ok) return ctx.reply(`⛔️ ${res.reason}`);
     await ctx.reply(
       [
@@ -1661,6 +1792,7 @@ export function createBot(stats) {
         detect: config.detect,
         contractAddress: config.contractAddress,
         quantity: config.quantity,
+        walletAddresses: mintSession.selectedWalletAddresses(config),
       });
 
       const lines = [`🔍 *Eligibility — ${config.quantity} per wallet*`, ""];

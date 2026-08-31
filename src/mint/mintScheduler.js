@@ -142,6 +142,7 @@ function persist() {
         contractAddress: a.contractAddress,
         quantity: a.quantity,
         walletCount: a.walletCount,
+        walletAddresses: Array.isArray(a.walletAddresses) ? a.walletAddresses : null,
         priceOverrideWei: a.priceOverrideWei == null ? null : a.priceOverrideWei.toString(),
         chatId: a.chatId,
         startsAtMs: a.startsAtMs,
@@ -168,14 +169,14 @@ function readPersisted() {
  * it is a mint, and it should go through CONFIRM where the person can see
  * what they are about to spend.
  */
-export function armMint({ chain, contractAddress, detect, quantity, walletCount, priceOverrideWei = null, chatId }) {
+export function armMint({ chain, contractAddress, detect, quantity, walletCount, walletAddresses = null, priceOverrideWei = null, chatId }) {
   const startsAt = detect.phase?.startsAt ?? null;
   if (!startsAt) return { ok: false, reason: "This drop has no scheduled phase to wait for." };
   if (startsAt.getTime() <= Date.now()) return { ok: false, reason: "That phase is already open — use CONFIRM MINT." };
 
   const key = keyFor(chain.key, contractAddress);
   armed.set(key, {
-    key, chainKey: chain.key, contractAddress, quantity, walletCount, priceOverrideWei, chatId,
+    key, chainKey: chain.key, contractAddress, quantity, walletCount, walletAddresses, priceOverrideWei, chatId,
     startsAtMs: startsAt.getTime(),
     prepared: null,
     // Guards against the loop re-entering prepare while one is in flight.
@@ -209,7 +210,7 @@ export function disarmMint(chainKey, contractAddress) {
 export function listArmedMints() {
   return [...armed.values()].map((a) => ({
     chainKey: a.chainKey, contractAddress: a.contractAddress,
-    quantity: a.quantity, walletCount: a.walletCount,
+    quantity: a.quantity, walletCount: a.walletCount, walletAddresses: a.walletAddresses ?? null,
     startsAt: new Date(a.startsAtMs), prepared: Boolean(a.prepared), fired: a.fired,
   }));
 }
@@ -252,6 +253,7 @@ async function prepare(entry, notify) {
       quantity: entry.quantity,
       priceOverrideWei: entry.priceOverrideWei,
       walletCount: entry.walletCount,
+      walletAddresses: entry.walletAddresses,
       atTimestamp: openSec > nowSec ? openSec : null,
     });
 
@@ -412,15 +414,16 @@ function restoreArmedMints(notify) {
       missed.push(row);
       continue;
     }
-    armed.set(keyFor(row.chainKey, row.contractAddress), {
-      key: keyFor(row.chainKey, row.contractAddress),
-      chainKey: row.chainKey,
-      contractAddress: row.contractAddress,
-      quantity: row.quantity,
-      walletCount: row.walletCount,
-      priceOverrideWei: row.priceOverrideWei == null ? null : BigInt(row.priceOverrideWei),
-      chatId: row.chatId,
-      startsAtMs: row.startsAtMs,
+      armed.set(keyFor(row.chainKey, row.contractAddress), {
+        key: keyFor(row.chainKey, row.contractAddress),
+        chainKey: row.chainKey,
+        contractAddress: row.contractAddress,
+        quantity: row.quantity,
+        walletCount: row.walletCount,
+        walletAddresses: Array.isArray(row.walletAddresses) ? row.walletAddresses : null,
+        priceOverrideWei: row.priceOverrideWei == null ? null : BigInt(row.priceOverrideWei),
+        chatId: row.chatId,
+        startsAtMs: row.startsAtMs,
       // Nothing signed is restored. A signature carries a nonce, and the
       // wallet may well have moved since — prepare() will rebuild it.
       prepared: null,

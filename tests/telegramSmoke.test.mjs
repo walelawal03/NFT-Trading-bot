@@ -277,6 +277,27 @@ await t("wallet count cannot exceed the loaded roster", async () => {
   assert.equal(mintSession.getSession(CHAT).wallets, 0, "no wallets loaded means it cannot go above 0");
 });
 
+await t("explicit wallet selection is tracked separately from wallet count", async () => {
+  const mintSession = await import("../src/mint/mintSession.js");
+  const detect = {
+    checked: true, name: "Test Drop", symbol: "T", standard: "seadrop",
+    totalSupply: 1n, maxSupply: 100n, soldOut: false, mintable: true,
+    phase: { kind: "public", priceWei: 1000000000000000n, startsAt: new Date(), endsAt: new Date(Date.now() + 3600e3), maxPerWallet: 3, feeBps: 0, live: true },
+    mintVia: { target: "0x" + "1".repeat(40), signature: "mintPublic(...)", note: "n" },
+    proxy: null,
+  };
+  const session = mintSession.startSession(CHAT, { chain: { key: "robinhood", label: "Robinhood Chain" }, contractAddress: "0x" + "b".repeat(40), detect });
+  mintSession.setWalletAddresses(CHAT, ["0x1111111111111111111111111111111111111111", "0x2222222222222222222222222222222222222222"]);
+  assert.deepEqual(mintSession.selectedWalletAddresses(session), [
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+  ]);
+  assert.equal(mintSession.effectiveWalletCount(session), 2);
+  mintSession.setWalletCount(CHAT, 1);
+  assert.equal(mintSession.selectedWalletAddresses(mintSession.getSession(CHAT)), null, "switching back to count mode should clear the explicit selection");
+  assert.equal(mintSession.getSession(CHAT).wallets, 0);
+});
+
 await t("a price override is applied, then clearable back to the contract price", async () => {
   const mintSession = await import("../src/mint/mintSession.js");
   await tap("mint:px:1000000000000000");
@@ -332,6 +353,22 @@ await t("the config text surfaces blockers above the buttons", async () => {
   const c = mintSession.getSession(CHAT);
   const text = buildMintConfigText({ ...c, detect: { ...c.detect, soldOut: true } });
   assert.match(text, /Can't mint:.*sold out/);
+});
+
+await t("the config text can surface eligible wallets inline", async () => {
+  const { buildMintConfigText } = await import("../src/telegram/mintKeyboard.js");
+  const mintSession = await import("../src/mint/mintSession.js");
+  const c = mintSession.getSession(CHAT);
+  const text = buildMintConfigText({
+    ...c,
+    walletEligibility: [
+      { address: "0x1111111111111111111111111111111111111111", balance: 1000000000000000n, minted: 0, remaining: 3, funded: true, ok: true, reason: null },
+      { address: "0x2222222222222222222222222222222222222222", balance: 0n, minted: 0, remaining: 3, funded: false, ok: false, reason: "insufficient funds" },
+    ],
+  });
+  assert.match(text, /Eligible wallets/);
+  assert.match(text, /0x11111111/);
+  assert.match(text, /insufficient funds/);
 });
 
 try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}

@@ -111,6 +111,18 @@ test("a drop with no scheduled phase is refused", () => {
   assert.equal(r.ok, false);
 });
 
+test("an armed mint stores the explicit wallet selection", () => {
+  reset();
+  const selected = [
+    "0x1111111111111111111111111111111111111111",
+    "0x2222222222222222222222222222222222222222",
+  ];
+  const r = arm(3600_000, { walletAddresses: selected });
+  assert.equal(r.ok, true);
+  const list = listArmedMints();
+  assert.deepEqual(list[0].walletAddresses, selected);
+});
+
 test("it prepares exactly once, then fires exactly once, at the open", async () => {
   reset();
   // Opens shortly, well inside the 90s prepare lead, so the loop should

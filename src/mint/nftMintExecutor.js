@@ -30,6 +30,22 @@ const MINTER_IS_PAYER = "0x0000000000000000000000000000000000000000";
 const DEFAULT_SEND_FEE_MULTIPLIER = 1.25;
 const RETRY_SEND_FEE_MULTIPLIER = 1.5;
 
+function resolveMintWalletKeys({ walletCount, walletAddresses = null }) {
+  const keys = loadMintWalletSigningKeys();
+  if (Array.isArray(walletAddresses) && walletAddresses.length) {
+    const byAddress = new Map(keys.map((key) => [new Wallet(key).address.toLowerCase(), key]));
+    const resolved = [];
+    const missing = [];
+    for (const address of walletAddresses) {
+      const key = byAddress.get(String(address).toLowerCase());
+      if (key) resolved.push(key);
+      else missing.push(address);
+    }
+    return { keys: resolved, missing };
+  }
+  return { keys: keys.slice(0, walletCount), missing: [] };
+}
+
 /**
  * Resolves the fee recipient the mint must pay.
  *
@@ -218,13 +234,16 @@ export function describeSendError(err) {
  * is the difference between minting and not. One wallet failing must never
  * hold up the others, so each result is captured rather than thrown.
  */
-export async function executeMint(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount }) {
+export async function executeMint(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, walletAddresses = null }) {
   const settings = loadMintExecutionSettings();
   if (!settings.enabled) {
     return { ok: false, reason: "Mint execution is disabled. Turn it on in mint settings first.", results: [] };
   }
 
-  const keys = loadMintWalletSigningKeys().slice(0, walletCount);
+  const { keys, missing } = resolveMintWalletKeys({ walletCount, walletAddresses });
+  if (walletAddresses?.length && missing.length) {
+    return { ok: false, reason: `Selected wallet${missing.length === 1 ? "" : "s"} not imported anymore.`, results: [] };
+  }
   if (keys.length === 0) return { ok: false, reason: "No wallets imported.", results: [] };
   if (!detect.mintVia) return { ok: false, reason: "No mint entrypoint on this contract.", results: [] };
 
@@ -424,11 +443,14 @@ async function estimateGasAt(provider, call, from, atTimestamp) {
   return provider.estimateGas({ ...call, from });
 }
 
-export async function prepareSignedMints(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, feeMultiplier = 2, atTimestamp = null }) {
+export async function prepareSignedMints(chain, { detect, contractAddress, quantity, priceOverrideWei = null, walletCount, walletAddresses = null, feeMultiplier = 2, atTimestamp = null }) {
   const settings = loadMintExecutionSettings();
   if (!settings.enabled) return { ok: false, reason: "Mint execution is disabled.", signed: [] };
 
-  const keys = loadMintWalletSigningKeys().slice(0, walletCount);
+  const { keys, missing } = resolveMintWalletKeys({ walletCount, walletAddresses });
+  if (walletAddresses?.length && missing.length) {
+    return { ok: false, reason: `Selected wallet${missing.length === 1 ? "" : "s"} not imported anymore.`, signed: [] };
+  }
   if (keys.length === 0) return { ok: false, reason: "No wallets imported.", signed: [] };
 
   const unitPriceWei = priceOverrideWei ?? detect.phase?.priceWei ?? null;
@@ -554,16 +576,19 @@ export async function broadcastSigned(chain, signed, { call } = {}) {
  *
  * Read-only. No transaction, no gas, and it works before minting is enabled.
  */
-export async function checkWalletEligibility(chain, { detect, contractAddress, quantity }) {
+export async function checkWalletEligibility(chain, { detect, contractAddress, quantity, walletAddresses = null }) {
   const provider = getProvider(chain);
   const wallets = listMintWallets();
+  const selected = Array.isArray(walletAddresses) && walletAddresses.length
+    ? new Set(walletAddresses.map((a) => String(a).toLowerCase()))
+    : null;
   const unitPriceWei = detect.phase?.priceWei ?? null;
 
   const STATS_ABI = ["function getMintStats(address) view returns (uint256 minterNumMinted, uint256 currentTotalSupply, uint256 maxSupply)"];
   const stats = detect.standard === "seadrop" ? new Contract(contractAddress, STATS_ABI, provider) : null;
 
   return Promise.all(
-    wallets.map(async (w) => {
+    wallets.filter((w) => !selected || selected.has(w.address.toLowerCase())).map(async (w) => {
       const [balance, minted] = await Promise.all([
         provider.getBalance(w.address).catch(() => null),
         stats ? stats.getMintStats(w.address).then((s) => Number(s[0])).catch(() => null) : Promise.resolve(null),

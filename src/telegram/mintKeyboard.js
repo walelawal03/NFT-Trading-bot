@@ -1,6 +1,6 @@
 import { Markup } from "telegraf";
 import { formatEther } from "ethers";
-import { totalCostWei } from "../mint/mintSession.js";
+import { effectiveWalletCount, selectedWalletAddresses, totalCostWei } from "../mint/mintSession.js";
 import { countMintWallets } from "../mint/mintWallets.js";
 import { explorerUrlFor } from "./formatMessage.js";
 import { openseaChainSlug } from "../risk/opensea.js";
@@ -52,6 +52,8 @@ export function buildMintConfigText(config) {
   const unit = config.priceOverrideWei ?? detect.phase?.priceWei ?? null;
   const total = totalCostWei(config);
   const walletsAvailable = countMintWallets();
+  const selected = selectedWalletAddresses(config);
+  const walletCount = effectiveWalletCount(config);
 
   const state = mintStatusLine(detect);
 
@@ -80,14 +82,15 @@ export function buildMintConfigText(config) {
     lines.push(`• Read issue: ${detect.reason}`);
   }
 
-  const wallets = Math.max(config.wallets, 1);
   const totalEth = total == null ? null : Number(formatEther(total));
   const balEth = config.walletBalanceWei == null ? null : Number(formatEther(config.walletBalanceWei));
 
   lines.push(
     "",
     "⚙️ *Your mint*",
-    `• ${config.quantity} per wallet × ${wallets} wallet${wallets === 1 ? "" : "s"} = *${config.quantity * wallets} total*`,
+    selected?.length
+      ? `• ${config.quantity} per wallet × *${walletCount} selected wallet${walletCount === 1 ? "" : "s"}* = *${config.quantity * walletCount} total*`
+      : `• ${config.quantity} per wallet × ${walletCount} wallet${walletCount === 1 ? "" : "s"} = *${config.quantity * walletCount} total*`,
     `• Cost: *${totalEth == null ? "unknown" : `${totalEth} ETH`}*${totalEth == null ? "" : usdSuffix(totalEth, config.ethUsd)}` +
       `${config.priceOverrideWei != null ? " _(price overridden)_" : ""}`
   );
@@ -110,7 +113,29 @@ export function buildMintConfigText(config) {
     const balUsd = balEth > 0 ? usdSuffix(balEth, config.ethUsd) : "";
     lines.push(`• Wallet: ${balEth.toFixed(6)} ETH${balUsd}${short ? " ⚠️ *not enough once gas is counted*" : ""}`);
   }
+  if (selected?.length) {
+    lines.push(`• Wallets: exact selection of ${selected.length}`);
+  } else {
+    lines.push(`• Wallets: first ${walletCount} wallet${walletCount === 1 ? "" : "s"} in roster order`);
+  }
   lines.push(`• Wallets loaded: ${walletsAvailable}`);
+
+  if (Array.isArray(config.walletEligibility) && config.walletEligibility.length) {
+    const eligible = config.walletEligibility.filter((r) => r.ok).length;
+    lines.push("", `🔍 *Eligible wallets* (${eligible}/${config.walletEligibility.length})`);
+    const renderOne = (r) => {
+      const bal = r.balance == null ? "?" : `${Number(formatEther(r.balance)).toFixed(5)} ETH`;
+      const minted = r.minted == null ? "" : ` · minted ${r.minted}`;
+      const allowance = r.remaining == null ? "" : ` · ${r.remaining} left`;
+      const suffix = r.ok ? "" : ` · ${String(r.reason || "would revert").slice(0, 60)}`;
+      return `${r.ok ? "✅" : "❌"} \`${r.address.slice(0, 10)}…\` ${bal}${minted}${allowance}${suffix}`;
+    };
+    const rows = config.walletEligibility.slice(0, 6).map(renderOne);
+    lines.push(...rows);
+    if (config.walletEligibility.length > rows.length) {
+      lines.push(`…and ${config.walletEligibility.length - rows.length} more`);
+    }
+  }
 
   // Market data, when the collection has traded enough to have any. A drop
   // minutes old has none of this and the section simply does not appear —
@@ -217,7 +242,9 @@ export function mintConfigKeyboard(config) {
   const max = detect.phase?.maxPerWallet ?? null;
   const walletsAvailable = countMintWallets();
   const atMax = max != null && config.quantity >= max;
-  const total = config.quantity * Math.max(config.wallets, 1);
+  const total = config.quantity * effectiveWalletCount(config);
+  const selected = selectedWalletAddresses(config);
+  const walletCount = effectiveWalletCount(config);
 
   // Section headers are full-width no-op buttons. They cost nothing, and on a
   // phone they turn an undifferentiated grid of +/− into three labelled
@@ -234,13 +261,24 @@ export function mintConfigKeyboard(config) {
       // control, it is a punishment.
       Markup.button.callback("⌨️", "mint:qty:type"),
     ],
-    [Markup.button.callback("💼 Number of wallets", "mint:noop")],
+    [Markup.button.callback("💼 Wallet selection", "mint:noop")],
+    ...(walletsAvailable
+      ? [[
+          Markup.button.callback("1", "mint:wallets:first:1"),
+          Markup.button.callback("2", "mint:wallets:first:2"),
+          Markup.button.callback("3", "mint:wallets:first:3"),
+          Markup.button.callback("4", "mint:wallets:first:4"),
+          Markup.button.callback("All", "mint:wallets:all"),
+        ]]
+      : []),
     [
       Markup.button.callback("−", "mint:wal:-1"),
-      Markup.button.callback(`✅ ${config.wallets}`, "mint:noop"),
-      Markup.button.callback(config.wallets >= walletsAvailable ? "•" : "+", config.wallets >= walletsAvailable ? "mint:noop" : "mint:wal:1"),
+      Markup.button.callback(selected?.length ? `✅ ${selected.length} selected` : `✅ ${config.wallets}`, "mint:noop"),
+      Markup.button.callback(config.wallets >= walletsAvailable && !selected?.length ? "•" : "+", config.wallets >= walletsAvailable && !selected?.length ? "mint:noop" : "mint:wal:1"),
       Markup.button.callback("⌨️", "mint:wal:type"),
+      Markup.button.callback("🎯", "mint:wallets:choose"),
     ],
+    ...(selected?.length ? [[Markup.button.callback("↩ Use first N wallets", "mint:wallets:clear")]] : []),
     [Markup.button.callback("💰 Mint price override", "mint:noop")],
     [
       Markup.button.callback("−0.01", "mint:px:-10000000000000000"),

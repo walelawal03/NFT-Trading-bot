@@ -5,6 +5,7 @@ import { detectNftMint } from "../mint/nftMintDetect.js";
 import { buildMintDetectMessage } from "./formatMintDetect.js";
 import { buildMintConfigText, mintConfigKeyboard, mintCardExtra, secondaryKeyboard } from "./mintKeyboard.js";
 import * as mintSession from "../mint/mintSession.js";
+import { checkWalletEligibility } from "../mint/nftMintExecutor.js";
 
 // Paste a contract address or a mint link; get mint options. No command.
 //
@@ -202,6 +203,7 @@ export async function handlePastedTarget(ctx, text) {
       // scrolled back to before tapping. Only fall back to the standalone
       // report when there are no controls to show.
       if (detect.mintVia) {
+        const initialQuantity = detect.phase?.maxPerWallet ?? 1;
         // Slug is only for the link preview — the OpenSea collection page
         // renders a proper card (image, floor, item count) where the bare
         // asset path does not. Deliberately best-effort and last: it is the
@@ -215,12 +217,19 @@ export async function handlePastedTarget(ctx, text) {
           loadCardExtras(chain, { slug: openseaSlug, contractAddress: target.address, allowOpenSea }),
           loadRoundTrip(chain, { detect, contractAddress: target.address }),
         ]);
+        const walletEligibility = await checkWalletEligibility(chain, {
+          detect,
+          contractAddress: target.address,
+          quantity: initialQuantity,
+        }).catch(() => null);
         const config = mintSession.startSession(ctx.chat.id, {
           chain,
           contractAddress: target.address,
           detect,
           openseaSlug,
           roundTrip,
+          walletEligibility,
+          quantity: initialQuantity,
           ...extras,
         });
         await ctx.reply(buildMintConfigText(config), { ...mintCardExtra(config), ...mintConfigKeyboard(config) });
@@ -238,6 +247,7 @@ export async function handlePastedTarget(ctx, text) {
           contractAddress: target.address,
           detect,
           openseaSlug,
+          walletEligibility: null,
           ...extras,
         });
         await ctx.reply(buildMintConfigText(config), {

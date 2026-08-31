@@ -69,6 +69,7 @@ export const CHAINS = {
     label: "Ethereum",
     wssEnvVar: "ETHEREUM_WSS_RPC",
     httpEnvVar: "ETHEREUM_HTTP_RPC",
+    openseaChainSlug: "ethereum",
     httpRpcUrls: ["https://ethereum-rpc.publicnode.com"],
     // publicnode refuses 1000-block eth_getLogs here the same way it does on
     // BSC (verified 2026-08-16), so log polling needs somewhere else to land.
@@ -91,6 +92,7 @@ export const CHAINS = {
     label: "Base",
     wssEnvVar: "BASE_WSS_RPC",
     httpEnvVar: "BASE_HTTP_RPC",
+    openseaChainSlug: "base",
     // Base's own public endpoint handles everything the bot asks for,
     // including the 1000-block log queries publicnode refuses (verified
     // 2026-08-16), so one list covers both jobs here.
@@ -192,6 +194,7 @@ export const CHAINS = {
     label: "Arbitrum",
     wssEnvVar: "ARBITRUM_WSS_RPC",
     httpEnvVar: "ARBITRUM_HTTP_RPC",
+    openseaChainSlug: "arbitrum",
     // Same story as Base — the chain's own endpoint serves the log queries
     // publicnode refuses (verified 2026-08-16).
     httpRpcUrls: ["https://arb1.arbitrum.io/rpc"],
@@ -206,9 +209,34 @@ export const CHAINS = {
     etherscanChainId: 42161,
     dexscreenerChainId: "arbitrum",
   },
+  monad: {
+    label: "Monad",
+    wssEnvVar: "MONAD_WSS_RPC",
+    httpEnvVar: "MONAD_HTTP_RPC",
+    httpRpcUrls: ["https://rpc.monad.xyz"],
+    logRpcUrls: ["https://rpc.monad.xyz"],
+    nativeSymbol: "MON",
+    // Monad mainnet is EVM-compatible and uses the same 18-decimal native
+    // balance format as the rest of the bot's mint flows.
+    etherscanChainId: 143,
+  },
+  arc: {
+    label: "Arc",
+    wssEnvVar: "ARC_WSS_RPC",
+    httpEnvVar: "ARC_HTTP_RPC",
+    httpRpcUrls: ["https://rpc.arc-scan.org"],
+    logRpcUrls: ["https://rpc.arc-scan.org"],
+    nativeSymbol: "USDC",
+    // Arc settles in USDC, not a volatile native coin. The balance is still an
+    // 18-decimal native balance, so the bot can treat it like the other EVM
+    // chains when it formats amounts.
+    etherscanChainId: 5042,
+    blockscoutBaseUrl: "https://api.arc-scan.org",
+  },
   robinhood: {
     label: "Robinhood Chain",
     wssEnvVar: "ROBINHOOD_WSS_RPC",
+    openseaChainSlug: "robinhood",
     // Robinhood Chain's public "feed" WSS is a proprietary Arbitrum Orbit
     // sequencer stream, not an eth_subscribe-compatible JSON-RPC endpoint —
     // confirmed by inspecting raw frames. Poll over HTTP instead.

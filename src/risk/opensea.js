@@ -64,17 +64,19 @@ async function request(path, { method = "GET", params, body } = {}) {
 // Robinhood Chain's slug ("robinhood") confirmed live at
 // opensea.io/discover/chain/robinhood — OpenSea announced support for it
 // directly (@opensea on X, "Robinhood Chain is now supported on OpenSea").
-const OPENSEA_CHAIN_SLUG = { ethereum: "ethereum", base: "base", robinhood: "robinhood" };
+const OPENSEA_CHAIN_SLUG = { ethereum: "ethereum", base: "base", arbitrum: "arbitrum", robinhood: "robinhood" };
 
 export function openseaChainSlug(chainKey) {
-  return OPENSEA_CHAIN_SLUG[chainKey] || chainKey;
+  return OPENSEA_CHAIN_SLUG[chainKey] || null;
 }
 
 // Resolves a raw contract address to its OpenSea collection slug + token
 // standard — needed because everything else in this module (stats,
 // listings, fulfillment) is keyed by collection slug, not bare address.
 export async function getContract(chainKey, contractAddress) {
-  const body = await request(`/chain/${openseaChainSlug(chainKey)}/contract/${contractAddress}`);
+  const slug = openseaChainSlug(chainKey);
+  if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
+  const body = await request(`/chain/${slug}/contract/${contractAddress}`);
   return {
     slug: body.collection || null,
     standard: body.token_standard || null,
@@ -161,7 +163,9 @@ export async function getCollectionStats(slug) {
 // price / owner count / verification status, none of which a pure on-chain
 // deploy-watcher could provide on its own.
 export async function listRecentCollections(chainKey, { limit = 50 } = {}) {
-  const body = await request("/collections", { params: { chain: openseaChainSlug(chainKey), order_by: "created_date", limit } });
+  const slug = openseaChainSlug(chainKey);
+  if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
+  const body = await request("/collections", { params: { chain: slug, order_by: "created_date", limit } });
   return (body.collections || []).map((c) => ({
     slug: c.collection,
     name: c.name || null,
@@ -175,6 +179,7 @@ export async function listRecentCollections(chainKey, { limit = 50 } = {}) {
 // Polling source for the wallet copy-trade watcher — sale events where
 // `address` was the buyer. occurredAfter is a unix-seconds cursor.
 export async function getAccountEvents(address, { eventType = "sale", chain = "ethereum", occurredAfter, limit = 50 } = {}) {
+  if (!openseaChainSlug(chain)) throw new Error(`OpenSea does not support ${chain}`);
   const body = await request(`/events/accounts/${address}`, {
     params: { event_type: eventType, chain, occurred_after: occurredAfter, limit },
   });
@@ -207,7 +212,9 @@ export async function getCheapestListing(chainKey, contractAddress) {
   // chains where the first call fails, so the path that already worked is
   // unchanged and no faster route is given up.
   try {
-    const body = await request(`/orders/${openseaChainSlug(chainKey)}/seaport/listings`, {
+    const slug = openseaChainSlug(chainKey);
+    if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
+    const body = await request(`/orders/${slug}/seaport/listings`, {
       params: { asset_contract_address: contractAddress, order_by: "eth_price", order_direction: "asc", limit: 1 },
     });
     const order = body.orders?.[0];
@@ -245,10 +252,12 @@ export async function getCheapestListing(chainKey, contractAddress) {
 // wallet.sendTransaction in execution/nftExecutor.js rather than pulling in
 // the opensea-js SDK.
 export async function getFulfillmentData({ orderHash, chainKey, protocolAddress, fulfillerAddress }) {
+  const slug = openseaChainSlug(chainKey);
+  if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
   const body = await request("/listings/fulfillment_data", {
     method: "POST",
     body: {
-      listing: { hash: orderHash, chain: openseaChainSlug(chainKey), protocol_address: protocolAddress },
+      listing: { hash: orderHash, chain: slug, protocol_address: protocolAddress },
       fulfiller: { address: fulfillerAddress },
     },
   });
@@ -258,7 +267,9 @@ export async function getFulfillmentData({ orderHash, chainKey, protocolAddress,
 // Posts a signed Seaport listing order (sell/exit path) — order must already
 // be built + signed (EIP-712 signTypedData) by the caller in nftExecutor.js.
 export async function postListing(chainKey, signedOrder) {
-  const body = await request(`/orders/${openseaChainSlug(chainKey)}/seaport/listings`, {
+  const slug = openseaChainSlug(chainKey);
+  if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
+  const body = await request(`/orders/${slug}/seaport/listings`, {
     method: "POST",
     body: signedOrder,
   });
@@ -316,11 +327,13 @@ export async function getBestListingBySlug(slug) {
 // Paged deliberately rather than trusting one call: the default page is 50,
 // and a wallet that minted a 60-item allocation would silently show 50.
 export async function getAccountNfts(chainKey, address, { maxPages = 4, limit = 50 } = {}) {
+  const slug = openseaChainSlug(chainKey);
+  if (!slug) throw new Error(`OpenSea does not support ${chainKey}`);
   const out = [];
   let next = null;
 
   for (let page = 0; page < maxPages; page++) {
-    const body = await request(`/chain/${openseaChainSlug(chainKey)}/account/${address}/nfts`, {
+    const body = await request(`/chain/${slug}/account/${address}/nfts`, {
       params: { limit, next },
     });
     for (const nft of body.nfts || []) {

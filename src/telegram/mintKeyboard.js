@@ -49,6 +49,8 @@ function fmtWhen(date) {
 
 export function buildMintConfigText(config) {
   const { detect, chain, contractAddress } = config;
+  const nativeSymbol = chain.nativeSymbol || "ETH";
+  const usd = nativeSymbol === "ETH" ? (value) => usdSuffix(value, config.ethUsd) : () => "";
   const unit = config.priceOverrideWei ?? detect.phase?.priceWei ?? null;
   const total = totalCostWei(config);
   const walletsAvailable = countMintWallets();
@@ -70,7 +72,7 @@ export function buildMintConfigText(config) {
     "",
     `• Standard: \`${detect.standard}\``,
     `• Supply: ${supply}`,
-    `• Price: *${fmt(unit)} ETH* each${detect.phase?.feeBps ? ` _(incl. ${detect.phase.feeBps / 100}% fee)_` : ""}`,
+    `• Price: *${fmt(unit)} ${nativeSymbol}* each${detect.phase?.feeBps ? ` _(incl. ${detect.phase.feeBps / 100}% fee)_` : ""}`,
     `• Max per wallet: ${detect.phase?.maxPerWallet ?? "unknown"}`,
   ];
 
@@ -91,7 +93,7 @@ export function buildMintConfigText(config) {
     selected?.length
       ? `• ${config.quantity} per wallet × *${walletCount} selected wallet${walletCount === 1 ? "" : "s"}* = *${config.quantity * walletCount} total*`
       : `• ${config.quantity} per wallet × ${walletCount} wallet${walletCount === 1 ? "" : "s"} = *${config.quantity * walletCount} total*`,
-    `• Cost: *${totalEth == null ? "unknown" : `${totalEth} ETH`}*${totalEth == null ? "" : usdSuffix(totalEth, config.ethUsd)}` +
+    `• Cost: *${totalEth == null ? "unknown" : `${totalEth} ${nativeSymbol}`}*${totalEth == null ? "" : usd(totalEth)}` +
       `${config.priceOverrideWei != null ? " _(price overridden)_" : ""}`
   );
 
@@ -110,8 +112,8 @@ export function buildMintConfigText(config) {
     const short = totalEth != null && balEth < totalEth + GAS_RESERVE_ETH;
     // usdSuffix renders 0 as "(free)", which is right for a cost and absurd
     // for a balance — an empty wallet is not free, it is empty.
-    const balUsd = balEth > 0 ? usdSuffix(balEth, config.ethUsd) : "";
-    lines.push(`• Wallet: ${balEth.toFixed(6)} ETH${balUsd}${short ? " ⚠️ *not enough once gas is counted*" : ""}`);
+    const balUsd = balEth > 0 ? usd(balEth) : "";
+    lines.push(`• Wallet: ${balEth.toFixed(6)} ${nativeSymbol}${balUsd}${short ? " ⚠️ *not enough once gas is counted*" : ""}`);
   }
   if (selected?.length) {
     lines.push(`• Wallets: exact selection of ${selected.length}`);
@@ -124,7 +126,7 @@ export function buildMintConfigText(config) {
     const eligible = config.walletEligibility.filter((r) => r.ok).length;
     lines.push("", `🔍 *Eligible wallets* (${eligible}/${config.walletEligibility.length})`);
     const renderOne = (r) => {
-      const bal = r.balance == null ? "?" : `${Number(formatEther(r.balance)).toFixed(5)} ETH`;
+      const bal = r.balance == null ? "?" : `${Number(formatEther(r.balance)).toFixed(5)} ${nativeSymbol}`;
       const minted = r.minted == null ? "" : ` · minted ${r.minted}`;
       const allowance = r.remaining == null ? "" : ` · ${r.remaining} left`;
       const suffix = r.ok ? "" : ` · ${String(r.reason || "would revert").slice(0, 60)}`;
@@ -152,8 +154,8 @@ export function buildMintConfigText(config) {
   const hasMarket = s && (floor != null || vol24h != null || s.numOwners != null);
   if (hasMarket) {
     lines.push("", "📊 *Market*");
-    if (floor != null) lines.push(`• Floor: *${eth(floor)} ETH*${usdSuffix(floor, config.ethUsd)}`);
-    if (vol24h != null) lines.push(`• 24h volume: ${eth(vol24h)} ETH${usdSuffix(vol24h, config.ethUsd)}`);
+    if (floor != null) lines.push(`• Floor: *${eth(floor)} ${nativeSymbol}*${usd(floor)}`);
+    if (vol24h != null) lines.push(`• 24h volume: ${eth(vol24h)} ${nativeSymbol}${usd(vol24h)}`);
     if (s.numOwners != null) lines.push(`• Owners: ${s.numOwners}${s.totalSales != null ? ` · ${s.totalSales} sales` : ""}`);
   }
 
@@ -163,7 +165,7 @@ export function buildMintConfigText(config) {
   if (config.listing?.priceEth != null) {
     lines.push(
       "",
-      `🛒 *Cheapest listing: ${eth(config.listing.priceEth)} ETH*${usdSuffix(config.listing.priceEth, config.ethUsd)}` +
+      `🛒 *Cheapest listing: ${eth(config.listing.priceEth)} ${nativeSymbol}*${usd(config.listing.priceEth)}` +
         `${config.listing.tokenId ? ` — #${config.listing.tokenId}` : ""}`
     );
   }
@@ -196,10 +198,11 @@ export function buildMintConfigText(config) {
   if (blockers.length) lines.push("", `⛔️ *Can't mint:* ${blockers.join(", ")}`);
 
   const explorer = explorerUrlFor(chain.key, contractAddress);
+  const openSea = openseaUrlFor(config);
   lines.push(
     "",
     `\`${contractAddress}\``,
-    [`[OpenSea](${openseaUrlFor(config)})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
+    [openSea && `[OpenSea](${openSea})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
   );
 
   return lines.join("\n");
@@ -209,9 +212,11 @@ export function buildMintConfigText(config) {
 // slug URL is the one that previews properly — image, floor, item count —
 // which is the whole reason to resolve it.
 export function openseaUrlFor(config) {
+  const slug = openseaChainSlug(config.chain.key);
+  if (!slug) return null;
   return config.openseaSlug
     ? `https://opensea.io/collection/${config.openseaSlug}`
-    : `https://opensea.io/assets/${openseaChainSlug(config.chain.key)}/${config.contractAddress}`;
+    : `https://opensea.io/assets/${slug}/${config.contractAddress}`;
 }
 
 /**
@@ -227,13 +232,18 @@ export function openseaUrlFor(config) {
  * keyboard, so the controls stay directly under the numbers they act on.
  */
 export function mintCardExtra(config) {
+  const url = openseaUrlFor(config);
   return {
     parse_mode: "Markdown",
-    link_preview_options: {
-      url: openseaUrlFor(config),
-      prefer_large_media: true,
-      show_above_text: true,
-    },
+    ...(url
+      ? {
+          link_preview_options: {
+            url,
+            prefer_large_media: true,
+            show_above_text: true,
+          },
+        }
+      : {}),
   };
 }
 
@@ -308,7 +318,7 @@ export function mintConfigKeyboard(config) {
 export function secondaryKeyboard(config) {
   const rows = [];
   if (config.listing?.priceEth != null) {
-    rows.push([Markup.button.callback(`🛒 BUY floor — ${eth(config.listing.priceEth)} ETH`, "mint:buyfloor")]);
+    rows.push([Markup.button.callback(`🛒 BUY floor — ${eth(config.listing.priceEth)} ${config.chain.nativeSymbol || "ETH"}`, "mint:buyfloor")]);
   }
   rows.push([Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")]);
   return Markup.inlineKeyboard(rows);
@@ -336,18 +346,19 @@ export function buildMintResultText({ result, chain, contractAddress, stats, eth
   const rawFloor = stats?.floorPriceEth ?? null;
   const floor = rawFloor != null && rawFloor > 0 ? rawFloor : null;
   const owned = result.balance ?? result.tokenIds.length;
+  const usd = chain.nativeSymbol === "ETH" ? (value) => usdSuffix(value, ethUsd) : () => "";
   const lines = [
     `✅ *Minted ${result.tokenIds.length} × ${result.name || "NFT"}*`,
     result.tokenIds.length ? `${result.tokenIds.map((id) => `#${id}`).join(", ")}` : "",
     "",
     `• You now hold: *${owned}*`,
-    `• Gas paid: ${eth(result.gasCostEth)} ETH${usdSuffix(result.gasCostEth, ethUsd)}`,
+    `• Gas paid: ${eth(result.gasCostEth)} ${chain.nativeSymbol || "ETH"}${usd(result.gasCostEth)}`,
   ];
 
   if (floor != null) {
     lines.push(
-      `• Floor: *${eth(floor)} ETH*${usdSuffix(floor, ethUsd)} each`,
-      `• Position at floor: *${eth(floor * owned)} ETH*${usdSuffix(floor * owned, ethUsd)}`
+      `• Floor: *${eth(floor)} ${chain.nativeSymbol || "ETH"}*${usd(floor)} each`,
+      `• Position at floor: *${eth(floor * owned)} ${chain.nativeSymbol || "ETH"}*${usd(floor * owned)}`
     );
   } else {
     // No floor yet is the normal state for a drop that just minted, and
@@ -355,7 +366,7 @@ export function buildMintResultText({ result, chain, contractAddress, stats, eth
     lines.push("• No floor yet — nothing has resold on the secondary market");
   }
 
-  if (listing?.priceEth != null) lines.push(`• Cheapest listing right now: ${eth(listing.priceEth)} ETH`);
+  if (listing?.priceEth != null) lines.push(`• Cheapest listing right now: ${eth(listing.priceEth)} ${chain.nativeSymbol || "ETH"}`);
 
   lines.push("", `\`${result.txHash}\``);
   return lines.filter((l) => l != null).join("\n");
@@ -373,7 +384,7 @@ export function mintResultKeyboard({ result, stats }) {
   const raw = stats?.floorPriceEth ?? null;
   const floor = raw != null && raw > 0 ? raw : null;
   if (result.ok && floor != null && result.tokenIds?.length) {
-    rows.push([Markup.button.callback(`🏷 List all at floor (${eth(floor)} ETH)`, "mint:sellfloor")]);
+    rows.push([Markup.button.callback(`🏷 List all at floor (${eth(floor)} ${chain.nativeSymbol || "ETH"})`, "mint:sellfloor")]);
     rows.push([Markup.button.callback(`🏷 List at floor +10%`, "mint:sellfloor:110")]);
   }
   rows.push([Markup.button.callback("🔄 Refresh", "mint:refresh"), Markup.button.callback("🔙 Menu", "menu:home")]);

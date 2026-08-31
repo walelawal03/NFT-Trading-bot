@@ -239,12 +239,11 @@ startMintScheduler({
 // OpenSea key exists — deliberately outside the block below. It is the one
 // discovery path that works on a collection nothing has indexed, which on
 // Base is most of them while the mint is still open.
-const nftWatcherStops = getNftChainDefs().map((nftChain) =>
-  startSeaDropWatcher(nftChain, handleUpcomingDrop)
-);
+const nftWatcherStops = getNftChainDefs().map((nftChain) => startSeaDropWatcher(nftChain, handleUpcomingDrop));
 
 if (config.openseaApiKey) {
   for (const nftChain of getNftChainDefs()) {
+    if (!nftChain.openseaChainSlug) continue;
     nftWatcherStops.push(startNftCollectionWatcher(nftChain, handleNewNftCollection));
     nftWatcherStops.push(startNftWalletWatcher(nftChain, handleWalletNftBuy));
   }

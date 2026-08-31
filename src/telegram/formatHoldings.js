@@ -73,13 +73,17 @@ const MAX_TOKENS_PER_COLLECTION = 20;
 const MAX_NAME_CHARS = 48;
 
 export function openseaCollectionUrl(group) {
+  const slug = openseaChainSlug(group.chainKey);
+  if (!slug) return null;
   return group.slug
     ? `https://opensea.io/collection/${group.slug}`
-    : `https://opensea.io/assets/${openseaChainSlug(group.chainKey)}/${group.contractAddress}`;
+    : `https://opensea.io/assets/${slug}/${group.contractAddress}`;
 }
 
 export function openseaTokenUrl(group, tokenId) {
-  return `https://opensea.io/assets/${openseaChainSlug(group.chainKey)}/${group.contractAddress}/${tokenId}`;
+  const slug = openseaChainSlug(group.chainKey);
+  if (!slug) return null;
+  return `https://opensea.io/assets/${slug}/${group.contractAddress}/${tokenId}`;
 }
 
 /**
@@ -199,9 +203,8 @@ export function buildHoldingsText({ holdings, ethUsd = null }) {
     }
 
     const explorer = explorerUrlFor(group.chainKey, group.contractAddress);
-    block.push(
-      [`[OpenSea](${openseaCollectionUrl(group)})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  ")
-    );
+    const openSea = openseaCollectionUrl(group);
+    block.push([openSea && `[OpenSea](${openSea})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  "));
 
     const size = block.join("\n").length + 1;
     if (used + size > MAX_CHARS) break;

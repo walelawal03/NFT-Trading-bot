@@ -5,21 +5,23 @@ import { getDataDir } from "./dataDir.js";
 
 const settingsPath = path.join(getDataDir(), "nftChains.json");
 
-// Chains this bot knows that OpenSea also indexes — the NFT feature is
-// OpenSea-backed end to end, so a chain OpenSea doesn't cover (BSC) can't
-// be offered no matter what the token side supports. Matches the slug map
-// in risk/opensea.js.
-export const NFT_CAPABLE_CHAIN_KEYS = ["ethereum", "base", "arbitrum", "robinhood"].filter((key) => CHAINS[key]);
+// Chains this bot can mint on. OpenSea-backed discovery only runs on the
+// subset that OpenSea actually indexes, but minting itself is chain-agnostic
+// as long as the chain exists in src/chains.js.
+export const NFT_CAPABLE_CHAIN_KEYS = ["ethereum", "base", "arbitrum", "monad", "arc", "robinhood"].filter(
+  (key) => CHAINS[key]
+);
 
 // Which chains NFT features (collection sniping, wallet copy-trading,
-// paper/real trading) are active on — deliberately separate from the token
+// paper/real trading) are active on â€” deliberately separate from the token
 // side's chain toggles, so e.g. Base can run tokens-only while Robinhood
 // runs both. Seeded once from the NFT_CHAINS env var (or legacy CHAINS alias;
-// default "base,ethereum,robinhood") on first run; data/nftChains.json is the
-// source of truth after that, edited live from the Chains menu — the same
-// persistence pattern as chainSettings.js on the token side.
+// default "base,ethereum,arbitrum,monad,arc,robinhood") on first run;
+// data/nftChains.json is the source of truth after that, edited live from the
+// Chains menu â€” the same persistence pattern as chainSettings.js on the
+// token side.
 function seedFromEnv() {
-  const envChains = (process.env.NFT_CHAINS || process.env.CHAINS || "base,ethereum,robinhood")
+  const envChains = (process.env.NFT_CHAINS || process.env.CHAINS || "base,ethereum,arbitrum,monad,arc,robinhood")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((key) => NFT_CAPABLE_CHAIN_KEYS.includes(key));

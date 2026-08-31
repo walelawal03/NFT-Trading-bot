@@ -8,7 +8,7 @@ code. So it doesn't compete on speed. It competes on **selection** (not minting
 rugs), **exits** (most mint bots have none), and **chain timing** (young chains
 where bot infrastructure hasn't arrived yet).
 
-Default chains are Base, Ethereum mainnet, and Robinhood Chain.
+Default chains are Base, Ethereum mainnet, Arbitrum, Monad, Arc, and Robinhood Chain.
 The app reads `NFT_CHAINS`; `CHAINS` is accepted as a legacy alias in `.env`.
 
 ## What it does today
@@ -55,7 +55,7 @@ Everything above works without it.
 4. Copy `.env.example` to `.env`. The default RPC endpoints need no signup.
 5. Set `REAL_TRADING_PASSCODE`. Without it the wallet menu locks itself out
    rather than exposing key reveal and key replacement behind a single tap.
-6. Optional: `ETHERSCAN_API_KEY` (deployer lookups; falls back to Blockscout),
+6. Optional: `ETHERSCAN_API_KEY` (deployer lookups; falls back to Blockscout or the chain's explorer API),
    `OPENSEA_API_KEY` (discovery, copy-trading, floor prices, listing).
 
 ```bash

@@ -41,16 +41,16 @@ const withTempEnv = async (env, fn) => {
 console.log("\nnftChains\n");
 
 await t("legacy CHAINS seeds the enabled NFT chain list", async () => {
-  await withTempEnv({ NFT_CHAINS: undefined, CHAINS: "base,ethereum,robinhood" }, async () => {
+  await withTempEnv({ NFT_CHAINS: undefined, CHAINS: "base,ethereum,arbitrum,monad,arc,robinhood" }, async () => {
     const mod = await importFresh("cha-alias");
-    assert.deepEqual(mod.loadEnabledNftChains(), ["base", "ethereum", "robinhood"]);
+    assert.deepEqual(mod.loadEnabledNftChains(), ["base", "ethereum", "arbitrum", "monad", "arc", "robinhood"]);
   });
 });
 
 await t("NFT_CHAINS wins when both aliases are present", async () => {
-  await withTempEnv({ NFT_CHAINS: "robinhood,ethereum", CHAINS: "base" }, async () => {
+  await withTempEnv({ NFT_CHAINS: "robinhood,monad,ethereum", CHAINS: "base" }, async () => {
     const mod = await importFresh("nft-alias");
-    assert.deepEqual(mod.loadEnabledNftChains(), ["robinhood", "ethereum"]);
+    assert.deepEqual(mod.loadEnabledNftChains(), ["robinhood", "monad", "ethereum"]);
   });
 });
 

@@ -27,6 +27,8 @@ const OPENSEA_SLUG = /opensea\.io\/collection\/([a-zA-Z0-9_-]+)/;
 const CHAIN_HINTS = [
   [/robinhood/i, "robinhood"],
   [/\bbase\b/i, "base"],
+  [/monad/i, "monad"],
+  [/\barc\b/i, "arc"],
 ];
 
 /**

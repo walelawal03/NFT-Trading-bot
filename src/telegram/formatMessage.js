@@ -4,6 +4,8 @@ const explorerUrls = {
   base: (addr) => `https://basescan.org/token/${addr}`,
   bsc: (addr) => `https://bscscan.com/token/${addr}`,
   arbitrum: (addr) => `https://arbiscan.io/token/${addr}`,
+  monad: (addr) => `https://monadvision.com/address/${addr}`,
+  arc: (addr) => `https://arc-scan.org/address/${addr}`,
   // Robinhood Chain's official explorer — Blockscout-powered, confirmed live.
   robinhood: (addr) => `https://robinhoodchain.blockscout.com/address/${addr}`,
 };
@@ -36,6 +38,8 @@ const txExplorerUrls = {
   base: (hash) => `https://basescan.org/tx/${hash}`,
   bsc: (hash) => `https://bscscan.com/tx/${hash}`,
   arbitrum: (hash) => `https://arbiscan.io/tx/${hash}`,
+  monad: (hash) => `https://monadvision.com/tx/${hash}`,
+  arc: (hash) => `https://arc-scan.org/tx/${hash}`,
   // Robinhood Chain's explorer used to be omitted here as unconfirmed, which
   // meant a real mint or sale on our primary target chain reported a bare tx
   // hash and no link. It is the same Blockscout instance the address links
@@ -198,4 +202,3 @@ export function buildNftTradingSummary({ settings, stats, mode = "paper" }) {
   }
   return lines.join("\n");
 }
-

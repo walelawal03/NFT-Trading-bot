@@ -2,6 +2,7 @@
   "enabled": [
     "base",
     "ethereum",
+    "hyperliquid",
     "robinhood"
   ]
 }

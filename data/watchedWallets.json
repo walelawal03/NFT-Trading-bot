@@ -1,0 +1,12 @@
+{
+  "wallets": [
+    {
+      "address": "0x87d20ea99c2a75ba65bc3e2974b263ed162d248e",
+      "label": "singledavinci.eth"
+    },
+    {
+      "address": "0x14f2c7b057e978d898b0dc55aa46eb8f5d1590f4",
+      "label": "superultraawesomedad.eth"
+    }
+  ]
+}

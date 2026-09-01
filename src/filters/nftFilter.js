@@ -61,6 +61,7 @@ const DEFAULTS = {
   blockFatalContract: true,
   blockUnknownContract: true,
   minRiskScore: 40,
+  maxCopyTradeBuyEth: 0,
   minCopyTradeBuyEth: 0,
   minWalletSignals: 0,
   minWalletWinRatePercent: 0,
@@ -151,6 +152,13 @@ export function applyNftFilter(riskResult, { source, triggerBuyPriceEth, trigger
   // Copy-trade-specific quality gate — a wallet buying a near-zero-value
   // item isn't much of a conviction signal. No token-side equivalent (yet):
   // token calls only ever have one trigger source.
+  if (source === "copy_trade" && filters.maxCopyTradeBuyEth >= 0) {
+    if (triggerBuyPriceEth == null) {
+      reasons.push("Copy-trade buy-in price could not be verified as free");
+    } else if (triggerBuyPriceEth > filters.maxCopyTradeBuyEth) {
+      reasons.push(`Copy-trade buy-in ${triggerBuyPriceEth} ETH above maximum ${filters.maxCopyTradeBuyEth} ETH — free mints only`);
+    }
+  }
   if (source === "copy_trade" && filters.minCopyTradeBuyEth > 0 && triggerBuyPriceEth != null) {
     if (triggerBuyPriceEth < filters.minCopyTradeBuyEth) {
       reasons.push(`Copy-trade buy-in ${triggerBuyPriceEth} ETH below minimum ${filters.minCopyTradeBuyEth} ETH — too small to treat as a signal`);

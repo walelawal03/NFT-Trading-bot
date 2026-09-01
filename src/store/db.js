@@ -1,11 +1,39 @@
+import fs from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 import { getDataDir } from "../dataDir.js";
+import { seedFileIfMissing } from "../dataDir.js";
 
 const dbPath = path.join(getDataDir(), "bot.sqlite");
 
 export const db = new DatabaseSync(dbPath);
 db.exec("PRAGMA journal_mode = WAL");
+
+function seedWatchedWallets() {
+  seedFileIfMissing("watchedWallets.json");
+  const seedPath = path.join(getDataDir(), "watchedWallets.json");
+  if (!fs.existsSync(seedPath)) return;
+
+  let raw;
+  try {
+    raw = JSON.parse(fs.readFileSync(seedPath, "utf8"));
+  } catch (err) {
+    console.error(`Failed to read watched wallet seed file: ${err.message}`);
+    return;
+  }
+
+  const wallets = Array.isArray(raw) ? raw : Array.isArray(raw?.wallets) ? raw.wallets : [];
+  if (!wallets.length) return;
+
+  const insert = db.prepare("INSERT OR IGNORE INTO watched_wallets (address, label, added_at) VALUES (?, ?, ?)");
+  const now = Date.now();
+  for (const entry of wallets) {
+    const address = typeof entry === "string" ? entry : entry?.address;
+    if (!address) continue;
+    const label = typeof entry === "string" ? null : entry?.label ?? null;
+    insert.run(String(address).toLowerCase(), label || null, typeof entry?.addedAt === "number" ? entry.addedAt : now);
+  }
+}
 
 db.exec(`
   -- A contract's creator is IMMUTABLE, so a lookup that succeeded once never
@@ -156,6 +184,7 @@ function addColumnIfMissing(table, column, definition) {
     db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
   }
 }
+seedWatchedWallets();
 // Post-call outcome snapshot — how did this collection's floor price move
 // in the 24h after the call, checked by nftOutcomeTracker.js. Powers the
 // per-wallet copy-trade track record (getWalletTrackRecord below): a

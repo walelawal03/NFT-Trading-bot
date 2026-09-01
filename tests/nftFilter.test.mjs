@@ -60,6 +60,18 @@ t("the same thresholds do apply to a secondary-market call", () => {
   saveNftFilters(f);
 });
 
+t("copy-trade signals default to free mints only", () => {
+  const f = loadNftFilters();
+  saveNftFilters({ ...f, maxCopyTradeBuyEth: 0 });
+  const r = applyNftFilter(
+    { ...cleanMint, stats: { numOwners: 3, floorPriceEth: 1, volume24hEth: 1 } },
+    { source: "copy_trade", triggerBuyPriceEth: 0.01, triggerWalletAddress: "0xabc" }
+  );
+  assert.equal(r.pass, false);
+  assert.ok(r.reasons.some((x) => /free mints only/i.test(x)), `expected a free-only rejection, got: ${r.reasons.join(" | ")}`);
+  saveNftFilters(f);
+});
+
 t("a fatal contract is rejected with the capability named, not just a score", () => {
   const r = applyNftFilter(
     withVerdict({ fatal: true, flags: ["🚨 Named holders can be blocked: blacklist(address) — a seller can be singled out at exit"] }, { score: 0 }),

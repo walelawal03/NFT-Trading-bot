@@ -186,6 +186,9 @@ function renderNftFiltersText(filters) {
     `  • Floor ${filters.minFloorPriceEth}–${filters.maxFloorPriceEth} ETH, 24h vol ≥ ${filters.minVolume24hEth} ETH`,
     `  • Owners ≥ ${filters.minOwnerCount}, concentration ≤ ${filters.maxOwnerConcentrationPercent}%`,
     "",
+    `*Copy-trade gate* — free mints only:`,
+    `  • Copy-trade buy-in ≤ ${filters.maxCopyTradeBuyEth} ETH`,
+    "",
     "Tap a setting to change it:",
   ].join("\n");
 }

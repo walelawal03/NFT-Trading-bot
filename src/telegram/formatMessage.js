@@ -5,6 +5,7 @@ const explorerUrls = {
   arbitrum: (addr) => `https://arbiscan.io/token/${addr}`,
   monad: (addr) => `https://monadvision.com/address/${addr}`,
   arc: (addr) => `https://arc-scan.org/address/${addr}`,
+  solana: (addr) => `https://solscan.io/token/${addr}`,
   hyperliquid: (addr) => `https://hyperevmscan.io/address/${addr}`,
   robinhood: (addr) => `https://robinhoodchain.blockscout.com/address/${addr}`,
 };
@@ -39,6 +40,7 @@ const txExplorerUrls = {
   arbitrum: (hash) => `https://arbiscan.io/tx/${hash}`,
   monad: (hash) => `https://monadvision.com/tx/${hash}`,
   arc: (hash) => `https://arc-scan.org/tx/${hash}`,
+  solana: (hash) => `https://solscan.io/tx/${hash}`,
   hyperliquid: (hash) => `https://hyperevmscan.io/tx/${hash}`,
   robinhood: (hash) => `https://robinhoodchain.blockscout.com/tx/${hash}`,
 };
@@ -102,6 +104,21 @@ export function buildNftCallMessage({ chain, contractAddress, riskResult, source
   );
 
   return lines.join("\n");
+}
+
+export function buildOpenSeaWalletSignalMessage({ chain, walletAddress, contractAddress, collectionName, slug, priceNative, txHash }) {
+  const nativeSymbol = chain.nativeSymbol || "SOL";
+  const explorer = txExplorerUrls[chain.key]?.(txHash) || null;
+  const openSea = slug ? `https://opensea.io/collection/${slug}` : null;
+  return [
+    `👛 *Wallet buy* - ${chain.label}`,
+    `Wallet: \`${walletAddress}\``,
+    `Collection: ${escapeMd(collectionName) || "Unknown"}`,
+    priceNative != null ? `Price: ${priceNative} ${nativeSymbol}` : "Price: unknown",
+    "",
+    `\`${contractAddress}\``,
+    [openSea && `[OpenSea](${openSea})`, explorer && `[Explorer](${explorer})`].filter(Boolean).join("  ·  "),
+  ].join("\n");
 }
 
 export function buildNftPaperTradeOpenMessage({ chain, contractAddress, name, tokenId, entryPriceEth, targetMultiple, stopFloorPct }) {

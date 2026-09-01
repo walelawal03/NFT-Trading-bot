@@ -64,7 +64,7 @@ async function request(path, { method = "GET", params, body } = {}) {
 // Robinhood Chain's slug ("robinhood") confirmed live at
 // opensea.io/discover/chain/robinhood — OpenSea announced support for it
 // directly (@opensea on X, "Robinhood Chain is now supported on OpenSea").
-const OPENSEA_CHAIN_SLUG = { ethereum: "ethereum", base: "base", arbitrum: "arbitrum", robinhood: "robinhood" };
+const OPENSEA_CHAIN_SLUG = { ethereum: "ethereum", base: "base", arbitrum: "arbitrum", solana: "solana", robinhood: "robinhood" };
 
 export function openseaChainSlug(chainKey) {
   return OPENSEA_CHAIN_SLUG[chainKey] || null;

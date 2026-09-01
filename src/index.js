@@ -15,6 +15,10 @@ import { startNftRealTradeChecker } from "./nftRealTrading.js";
 import { startNftOutcomeTracker } from "./nftOutcomeTracker.js";
 import { startMintScheduler } from "./mint/mintScheduler.js";
 import { getNftChainDefs } from "./nftChains.js";
+import { getContract } from "./risk/opensea.js";
+import { postOpenSeaWalletSignal } from "./telegram/bot.js";
+
+const SOLANA_OPENSEA_CHAIN = { key: "solana", label: "Solana", nativeSymbol: "SOL", openseaChainSlug: "solana" };
 
 // This is the NFT mint underwriter. It is a SEPARATE BOT from the token
 // trading bot, and nothing token-related runs — or exists — here any more.
@@ -72,6 +76,25 @@ async function handleWalletNftBuy({ chain, walletAddress, contractAddress, price
     }
   } catch (err) {
     console.error(`[${chain.key}] failed to process copy-trade NFT ${contractAddress}:`, err.message);
+  }
+}
+
+async function handleSolanaWalletNftBuy({ walletAddress, contractAddress, tokenId, priceEth, txHash }) {
+  if (isPaused()) return;
+  console.log(`[solana] watched wallet ${walletAddress} bought NFT ${contractAddress} for ${priceEth ?? "?"} SOL`);
+  try {
+    const info = await getContract("solana", contractAddress).catch(() => null);
+    await postOpenSeaWalletSignal(bot, {
+      chain: SOLANA_OPENSEA_CHAIN,
+      walletAddress,
+      contractAddress,
+      collectionName: info?.name || info?.slug || "Unknown Solana NFT",
+      slug: info?.slug || null,
+      priceNative: priceEth,
+      txHash,
+    });
+  } catch (err) {
+    console.error(`[solana] failed to process copy-trade NFT ${contractAddress}:`, err.message);
   }
 }
 
@@ -239,7 +262,11 @@ startMintScheduler({
 // OpenSea key exists — deliberately outside the block below. It is the one
 // discovery path that works on a collection nothing has indexed, which on
 // Base is most of them while the mint is still open.
-const nftWatcherStops = getNftChainDefs().map((nftChain) => startSeaDropWatcher(nftChain, handleUpcomingDrop));
+const nftWatcherStops = [];
+for (const nftChain of getNftChainDefs()) {
+  if (!nftChain.openseaChainSlug) continue;
+  nftWatcherStops.push(startSeaDropWatcher(nftChain, handleUpcomingDrop));
+}
 
 if (config.openseaApiKey) {
   for (const nftChain of getNftChainDefs()) {
@@ -247,6 +274,7 @@ if (config.openseaApiKey) {
     nftWatcherStops.push(startNftCollectionWatcher(nftChain, handleNewNftCollection));
     nftWatcherStops.push(startNftWalletWatcher(nftChain, handleWalletNftBuy));
   }
+  nftWatcherStops.push(startNftWalletWatcher(SOLANA_OPENSEA_CHAIN, handleSolanaWalletNftBuy));
   startNftBuyRecheckQueue(bot);
   startNftPaperTradeChecker(bot);
   startNftRealTradeChecker(bot);

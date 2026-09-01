@@ -153,6 +153,12 @@ await t("the filter menu explains what each group gates", async () => {
   assert.match(out, /Minimum risk score: 40/);
 });
 
+await t("/watchwallet accepts a Solana public key", async () => {
+  const out = texts(await send("/watchwallet So11111111111111111111111111111111111111112 sol-test"));
+  assert.match(out, /Now watching/);
+  assert.match(out, /So11111111111111111111111111111111111111112/);
+});
+
 await t("boolean filters render as checkboxes, numbers as edit buttons", async () => {
   const calls = await tap("menu:nftfilter");
   const markup = JSON.stringify(calls.find((c) => c.payload?.reply_markup)?.payload.reply_markup);

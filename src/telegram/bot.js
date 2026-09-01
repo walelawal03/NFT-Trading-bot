@@ -44,16 +44,18 @@ import { loadNftPaperTradingSettings, saveNftPaperTradingSettings } from "../nft
 import { loadNftRealTradingSettings, saveNftRealTradingSettings } from "../nftRealTradingSettings.js";
 import {
   buildNftCallMessage,
+  buildOpenSeaWalletSignalMessage,
   buildNftTradingSummary,
   fmtUsd,
   escapeMd,
 } from "./formatMessage.js";
 
 const ADDRESS_RE = /0x[a-fA-F0-9]{40}/;
+const SOLANA_ADDRESS_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const ENS_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)*\.eth$/i;
 const PENDING_TTL_MS = 5 * 60 * 1000;
 
-// Accepts either a raw 0x address or an ENS .eth name — shared by every
+// Accepts either a raw 0x address, a Solana public key, or an ENS .eth name — shared by every
 // "add a watched wallet" entry point (the Add Wallet button flow and the
 // /watchwallet command) so both take the same input formats. Returns null
 // if the input is neither a valid address nor a resolvable ENS name. When
@@ -62,6 +64,7 @@ const PENDING_TTL_MS = 5 * 60 * 1000;
 // caller only overrides it if the user typed an explicit label too.
 async function resolveWalletAddressInput(input) {
   if (ADDRESS_RE.test(input)) return { address: input, label: null };
+  if (SOLANA_ADDRESS_RE.test(input)) return { address: input, label: null };
   if (ENS_RE.test(input)) {
     const resolved = await resolveEnsName(input);
     if (!resolved) return null;
@@ -1853,7 +1856,7 @@ export function createBot(stats) {
     if (!isAdmin(ctx)) return ctx.reply("Not authorized.");
     setPending(ctx.chat.id, { type: "nftWalletAdd" });
     await ctx.reply(
-      "Send the wallet address or ENS name (`name.eth`) to watch, optionally followed by a label — e.g. `0xabc... whale1` or `vitalik.eth`",
+      "Send the wallet address, Solana public key, or ENS name (`name.eth`) to watch, optionally followed by a label — e.g. `0xabc... whale1`, `vitalik.eth`, or a Solana wallet address",
       { parse_mode: "Markdown" }
     );
   });
@@ -2126,9 +2129,9 @@ export function createBot(stats) {
   bot.command("watchwallet", async (ctx) => {
     if (!isAdmin(ctx)) return ctx.reply("Not authorized.");
     const [, rawInput, ...labelParts] = ctx.message.text.split(/\s+/);
-    if (!rawInput) return ctx.reply("Usage: /watchwallet <address or name.eth> [label]");
+    if (!rawInput) return ctx.reply("Usage: /watchwallet <address, Solana public key, or name.eth> [label]");
     const resolved = await resolveWalletAddressInput(rawInput);
-    if (!resolved) return ctx.reply("That doesn't look like a valid wallet address or resolvable ENS name.");
+    if (!resolved) return ctx.reply("That doesn't look like a valid wallet address, Solana public key, or resolvable ENS name.");
     const label = labelParts.join(" ") || resolved.label;
     addWatchedWallet(resolved.address, label);
     ctx.reply(`👛 Now watching \`${resolved.address}\`${label ? ` (${escapeMd(label)})` : ""}`, { parse_mode: "Markdown" });
@@ -2149,8 +2152,8 @@ export function createBot(stats) {
       .filter(Boolean);
     if (entries.length === 0) {
       return ctx.reply(
-        "Usage: /watchwallets followed by one address or ENS name per line (optional label after it), e.g.\n" +
-          "/watchwallets\n0xabc... whale1\nvitalik.eth"
+        "Usage: /watchwallets followed by one address, Solana public key, or ENS name per line (optional label after it), e.g.\n" +
+          "/watchwallets\n0xabc... whale1\nvitalik.eth\nSo1anaPubKey..."
       );
     }
     await ctx.reply(`Processing ${entries.length} entries…`);
@@ -2327,6 +2330,24 @@ export async function postNftCall(bot, { chain, contractAddress, riskResult, sou
           console.error(`Text fallback also failed for ${destination}:`, err2.message);
         }
       }
+    }
+  }
+  return primaryMessageId;
+}
+
+export async function postOpenSeaWalletSignal(bot, { chain, walletAddress, contractAddress, collectionName, slug, priceNative, txHash }) {
+  if (!isNftNotificationsEnabled()) return null;
+  const message = truncateForTelegram(
+    buildOpenSeaWalletSignalMessage({ chain, walletAddress, contractAddress, collectionName, slug, priceNative, txHash })
+  );
+
+  let primaryMessageId = null;
+  for (const destination of activeDestinations()) {
+    try {
+      const sent = await bot.telegram.sendMessage(destination, message, { parse_mode: "Markdown" });
+      if (destination === config.telegram.chatId) primaryMessageId = sent.message_id;
+    } catch (err) {
+      console.error(`Failed to send OpenSea wallet signal to ${destination}:`, err.message);
     }
   }
   return primaryMessageId;

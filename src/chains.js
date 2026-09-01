@@ -233,6 +233,16 @@ export const CHAINS = {
     etherscanChainId: 5042,
     blockscoutBaseUrl: "https://api.arc-scan.org",
   },
+  hyperliquid: {
+    label: "Hyperliquid",
+    httpEnvVar: "HYPERLIQUID_HTTP_RPC",
+    pollingOnly: true,
+    httpRpcUrls: ["https://rpc.hyperliquid.xyz/evm"],
+    logRpcUrls: ["https://rpc.hyperliquid.xyz/evm"],
+    nativeSymbol: "HYPE",
+    // Hyperliquid's HyperEVM mainnet is chain ID 999.
+    etherscanChainId: 999,
+  },
   robinhood: {
     label: "Robinhood Chain",
     wssEnvVar: "ROBINHOOD_WSS_RPC",

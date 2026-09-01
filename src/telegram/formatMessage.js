@@ -1,4 +1,3 @@
-
 const explorerUrls = {
   ethereum: (addr) => `https://etherscan.io/token/${addr}`,
   base: (addr) => `https://basescan.org/token/${addr}`,
@@ -6,7 +5,7 @@ const explorerUrls = {
   arbitrum: (addr) => `https://arbiscan.io/token/${addr}`,
   monad: (addr) => `https://monadvision.com/address/${addr}`,
   arc: (addr) => `https://arc-scan.org/address/${addr}`,
-  // Robinhood Chain's official explorer — Blockscout-powered, confirmed live.
+  hyperliquid: (addr) => `https://hyperevmscan.io/address/${addr}`,
   robinhood: (addr) => `https://robinhoodchain.blockscout.com/address/${addr}`,
 };
 
@@ -16,7 +15,7 @@ export function explorerUrlFor(chainKey, addr) {
 
 const gradeEmoji = { A: "🟢", B: "🟩", C: "🟡", D: "🟠", F: "🔴" };
 
-// Legacy Telegram Markdown treats _, *, `, [ as entity delimiters — an odd
+// Legacy Telegram Markdown treats _, *, `, [ as entity delimiters - an odd
 // count of any of them (common in on-chain token symbols and raw error
 // text, both outside our control) leaves an entity unclosed and Telegram
 // rejects the whole message with "can't parse entities", silently dropping
@@ -40,10 +39,7 @@ const txExplorerUrls = {
   arbitrum: (hash) => `https://arbiscan.io/tx/${hash}`,
   monad: (hash) => `https://monadvision.com/tx/${hash}`,
   arc: (hash) => `https://arc-scan.org/tx/${hash}`,
-  // Robinhood Chain's explorer used to be omitted here as unconfirmed, which
-  // meant a real mint or sale on our primary target chain reported a bare tx
-  // hash and no link. It is the same Blockscout instance the address links
-  // above already use, and it has been confirmed live.
+  hyperliquid: (hash) => `https://hyperevmscan.io/tx/${hash}`,
   robinhood: (hash) => `https://robinhoodchain.blockscout.com/tx/${hash}`,
 };
 
@@ -64,11 +60,11 @@ export function buildNftCallMessage({ chain, contractAddress, riskResult, source
   const explorer = explorerUrlFor(chain.key, contractAddress);
   const openseaUrl = slug ? `https://opensea.io/collection/${slug}` : null;
   const sourceTag =
-    source === "copy_trade" ? `👤 *Copy Signal* — ${escapeMd(triggerWalletLabel) || "a watched wallet"} just bought in` : "🆕 *New Collection*";
+    source === "copy_trade" ? `👤 *Copy Signal* - ${escapeMd(triggerWalletLabel) || "a watched wallet"} just bought in` : "🆕 *New Collection*";
 
   // Where contract safety came from. At mint time this is usually the only
-  // category carrying real information — marketplace liquidity and holder
-  // distribution are structurally near-zero before a market exists — so the
+  // category carrying real information - marketplace liquidity and holder
+  // distribution are structurally near-zero before a market exists - so the
   // reader should be able to see whether the 35 was earned by a scan that
   // succeeded or defaulted from one that didn't.
   const verdict = riskResult.contractVerdict;
@@ -81,10 +77,10 @@ export function buildNftCallMessage({ chain, contractAddress, riskResult, source
         : ` via \`${riskResult.contractScan?.proxy?.via ?? "direct"}\``;
 
   const lines = [
-    `📣 *NEW NFT CALL* — ${escapeMd(name) || "Unknown"} on ${chain.label}`,
+    `📣 *NEW NFT CALL* - ${escapeMd(name) || "Unknown"} on ${chain.label}`,
     sourceTag,
     "",
-    `${gradeEmoji[grade]} *Risk Score: ${score}/100 — ${grade} (${label})*`,
+    `${gradeEmoji[grade]} *Risk Score: ${score}/100 - ${grade} (${label})*`,
     `  • Contract safety: ${breakdown.contractSafety}/35${scanTag}`,
     `  • Marketplace liquidity: ${breakdown.marketplaceLiquidity}/25`,
     `  • Holder distribution: ${breakdown.holderDistribution}/20`,
@@ -110,7 +106,7 @@ export function buildNftCallMessage({ chain, contractAddress, riskResult, source
 
 export function buildNftPaperTradeOpenMessage({ chain, contractAddress, name, tokenId, entryPriceEth, targetMultiple, stopFloorPct }) {
   return [
-    `📝 *NFT paper trade opened* — ${escapeMd(name) || "Unknown"} #${tokenId} on ${chain.label}`,
+    `📝 *NFT paper trade opened* - ${escapeMd(name) || "Unknown"} #${tokenId} on ${chain.label}`,
     `Entry: ${fmtEth(entryPriceEth)}`,
     `Target: ${targetMultiple}x floor | Stop: ${stopFloorPct}% of entry`,
     "",
@@ -121,7 +117,7 @@ export function buildNftPaperTradeOpenMessage({ chain, contractAddress, name, to
 export function buildNftRealTradeOpenMessage({ chain, contractAddress, name, tokenId, entryPriceEth, targetMultiple, stopFloorPct, txHash, gasEth }) {
   const explorer = txExplorerUrls[chain.key]?.(txHash);
   return [
-    `💰 *REAL NFT trade opened* — ${escapeMd(name) || "Unknown"} #${tokenId} on ${chain.label}`,
+    `💰 *REAL NFT trade opened* - ${escapeMd(name) || "Unknown"} #${tokenId} on ${chain.label}`,
     `Entry: ${fmtEth(entryPriceEth)} | Gas: ${fmtEth(gasEth)}`,
     `Target: ${targetMultiple}x floor | Stop: ${stopFloorPct}% of entry`,
     "",
@@ -130,7 +126,7 @@ export function buildNftRealTradeOpenMessage({ chain, contractAddress, name, tok
   ].join("\n");
 }
 
-// "Listed for sale, waiting for a buyer" — a real intermediate state with no
+// "Listed for sale, waiting for a buyer" - a real intermediate state with no
 // token-side equivalent (a token exit is one instant swap; an NFT exit is a
 // marketplace order that may sit unfilled for a while, or never fill at the
 // listed price).
@@ -141,16 +137,16 @@ export function buildNftListedMessage({ chain, contractAddress, name, tokenId, l
     `🏷️ *${modeLabel}NFT listed for sale* (${reasonLabel})`,
     `${escapeMd(name) || "Unknown"} #${tokenId} on ${chain.label}`,
     `Listed at: ${fmtEth(listedPriceEth)}`,
-    "⏳ Not a guaranteed or instant exit — this waits for a buyer on OpenSea.",
+    "⏳ Not a guaranteed or instant exit - this waits for a buyer on OpenSea.",
     "",
     `\`${contractAddress}\``,
   ].join("\n");
 }
 
 const NFT_CLOSE_HEADLINES = {
-  take_profit_sold: "🎯 *NFT trade closed — SOLD at target*",
-  stop_loss_sold: "🛑 *NFT trade closed — SOLD at stop*",
-  manual_close: "🛑 *NFT trade closed — manual*",
+  take_profit_sold: "🎯 *NFT trade closed - SOLD at target*",
+  stop_loss_sold: "🛑 *NFT trade closed - SOLD at stop*",
+  manual_close: "🛑 *NFT trade closed - manual*",
 };
 
 export function buildNftPaperTradeCloseMessage({ chain, contractAddress, name, tokenId, entryPriceEth, exitPriceEth, pnlEth, pnlPct, exitReason }) {
@@ -184,14 +180,14 @@ export function buildNftRealTradeCloseMessage({ chain, contractAddress, name, to
 
 export function buildNftTradingSummary({ settings, stats, mode = "paper" }) {
   const modeLabel = mode === "real" ? "💰 *Real NFT Trading*" : "📈 *NFT Paper Trading*";
-  const statusLabel = mode === "real" ? (settings.enabled ? "🔴 LIVE — real money" : "⚪️ off") : settings.enabled ? "🟢 running" : "⏸ paused";
+  const statusLabel = mode === "real" ? (settings.enabled ? "🔴 LIVE - real money" : "⚪️ off") : settings.enabled ? "🟢 running" : "⏸ paused";
   const lines = [
     modeLabel,
     "",
     `Status: ${statusLabel}`,
     `Budget: ${fmtEth(settings.totalBudgetEth)} total | ${fmtEth(settings.positionSizeEth)}/item`,
     `Target: ${settings.targetMultiple}x floor | Stop: ${settings.stopFloorPct}% of entry`,
-    "⚠️ NFT exits list on OpenSea and wait for a buyer — not an instant swap like token trading.",
+    "⚠️ NFT exits list on OpenSea and wait for a buyer - not an instant swap like token trading.",
     "",
     `Open/listed positions: ${stats.openCount} (${fmtEth(stats.deployedEth)} deployed)`,
     `Closed trades: ${stats.closedCount}`,

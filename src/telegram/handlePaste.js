@@ -29,6 +29,8 @@ const CHAIN_HINTS = [
   [/\bbase\b/i, "base"],
   [/monad/i, "monad"],
   [/\barc\b/i, "arc"],
+  [/hyperliquid/i, "hyperliquid"],
+  [/hyperevm/i, "hyperliquid"],
 ];
 
 /**
